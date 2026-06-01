@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.wb04307201</groupId>
+        <artifactId>flex-schedule-parent</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>flex-schedule-redis</artifactId>
+    <name>FlexSchedule Redis Integration</name>
+    <description>Redis-based distributed lock implementation for flex-schedule-spring-boot-starter</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.wb04307201</groupId>
+            <artifactId>flex-schedule</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>

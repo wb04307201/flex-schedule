@@ -1,0 +1,53 @@
+{
+  "properties": [
+    {
+      "name": "flex.schedule.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable or disable the flex schedule auto-configuration.",
+      "defaultValue": true,
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties"
+    },
+    {
+      "name": "flex.schedule.pool-size",
+      "type": "java.lang.Integer",
+      "description": "Number of threads in the scheduler pool.",
+      "defaultValue": 16,
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties"
+    },
+    {
+      "name": "flex.schedule.thread-name-prefix",
+      "type": "java.lang.String",
+      "description": "Prefix for thread names created by the scheduler pool.",
+      "defaultValue": "FlexScheduleThreadPool-",
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties"
+    },
+    {
+      "name": "flex.schedule.remove-on-cancel",
+      "type": "java.lang.Boolean",
+      "description": "Whether cancelled tasks should be removed from the thread pool queue immediately.",
+      "defaultValue": true,
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties"
+    },
+    {
+      "name": "flex.schedule.await-termination-seconds",
+      "type": "java.lang.Long",
+      "description": "Maximum seconds to wait for in-flight tasks to complete during graceful shutdown.",
+      "defaultValue": 30,
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties"
+    },
+    {
+      "name": "flex.schedule.endpoint.write-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable write operations (POST/DELETE) on the actuator endpoint. Disabled by default for security.",
+      "defaultValue": false,
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties$Endpoint"
+    },
+    {
+      "name": "flex.schedule.endpoint.allowed-beans",
+      "type": "java.util.Set<java.lang.String>",
+      "description": "Allowlist of bean names that can be scheduled via the actuator endpoint. Empty set means all beans are allowed.",
+      "defaultValue": [],
+      "sourceType": "cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties$Endpoint"
+    }
+  ]
+}
