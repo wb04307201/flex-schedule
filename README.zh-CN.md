@@ -1,12 +1,17 @@
 # FlexSchedule 灵动调度
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![JDK](https://img.shields.io/badge/JDK-17%2B-orange.svg)](https://openjdk.org/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3-brightgreen.svg)](https://spring.io/projects/spring-boot)
+<div align="right">
+  <a href="README.md">English</a> | 中文
+</div>
 
-基于 Spring Boot 的轻量化动态调度线程池，支持运行时动态添加、移除、替换定时任务。
+> 基于 Spring Boot 的轻量化动态调度线程池，支持运行时动态添加、移除、替换定时任务。
 
-[English](README.md) | [中文](README.zh-CN.md)
+![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/flex-schedule-spring-boot-starter?style=flat-square)
+[![star](https://gitee.com/wb04307201/flex-schedule/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
+[![fork](https://gitee.com/wb04307201/flex-schedule/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
+[![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
+[![fork](https://img.shields.io/github/forks/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)  
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)![SpringAI](https://img.shields.io/badge/Spring%20AI-1+-green.svg)
 
 ---
 
@@ -42,17 +47,17 @@
 ### Maven
 
 ```xml
-<depkendency>
+<dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-spring-boot-starter</artifactId>
-    <version>${latest.version}</version>
-</depkendency>
+    <version>1.2.0</version>
+</dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:${latest.version}'
+implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.0'
 ```
 
 ## 快速开始
