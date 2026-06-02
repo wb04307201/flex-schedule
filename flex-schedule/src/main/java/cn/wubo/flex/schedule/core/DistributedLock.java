@@ -14,7 +14,7 @@ import java.time.Duration;
  * tasks execute on all nodes (no cluster coordination).
  * </p>
  *
- * <h3>Usage with ShedLock:</h3>
+ * <h2>Usage with ShedLock:</h2>
  * <pre>{@code
  * // In your Spring configuration:
  * @Bean
@@ -23,7 +23,7 @@ import java.time.Duration;
  * }
  * }</pre>
  *
- * <h3>Usage with Redis:</h3>
+ * <h2>Usage with Redis:</h2>
  * <pre>{@code
  * @Bean
  * public DistributedLock redisDistributedLock(StringRedisTemplate redisTemplate) {
