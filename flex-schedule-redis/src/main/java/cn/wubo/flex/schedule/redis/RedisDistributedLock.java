@@ -15,13 +15,13 @@ import java.util.UUID;
  * </p>
  * <p>
  * Example usage:
+ * </p>
  * <pre>{@code
  * @Bean
  * public DistributedLock redisDistributedLock(StringRedisTemplate redisTemplate) {
  *     return new RedisDistributedLock(redisTemplate);
  * }
  * }</pre>
- * </p>
  */
 public class RedisDistributedLock implements DistributedLock {
 
