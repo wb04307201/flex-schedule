@@ -10,9 +10,6 @@ import java.util.Set;
  * explicitly enabled via {@code flex.schedule.endpoint.write-enabled=true}.
  * <p>
  * When an allowlist is configured, only beans in the list can be scheduled via the endpoint.
- *
- * @param writeEnabled whether write operations are permitted
- * @param allowedBeans set of bean names allowed for scheduling (empty = all beans allowed)
  */
 public class DefaultEndpointAccessControl implements EndpointAccessControl {
 
