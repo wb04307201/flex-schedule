@@ -11,7 +11,7 @@
 [![fork](https://gitee.com/wb04307201/flex-schedule/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
 [![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
 [![fork](https://img.shields.io/github/forks/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)  
-![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)![SpringAI](https://img.shields.io/badge/Spring%20AI-1+-green.svg)
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)
 
 ---
 
@@ -34,13 +34,6 @@
 - **健康检查** — 向 `/actuator/health` 报告调度器状态（可选）
 - **Actuator 端点** — REST CRUD 管理 `/actuator/flexschedule`，含访问控制（可选）
 - **反射调度** — `BeanMethodRunnable` 按名称调用 Bean 方法，支持 AOP 代理
-
-## 环境要求
-
-| 依赖 | 版本 |
-|------|------|
-| JDK | 17+ |
-| Spring Boot | 3.x |
 
 ## 安装
 
