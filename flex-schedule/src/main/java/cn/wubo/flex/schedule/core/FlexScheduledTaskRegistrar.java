@@ -148,7 +148,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 try {
                     ScheduledTask scheduledTask = scheduleByType(def, runnable);
                     ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel,
-                            def.taskType(), describeSchedule(def), null, false, createdAt);
+                            def.taskType(), describeSchedule(def), def.retryPolicy(), false, createdAt);
                     taskMap.put(def.taskName(), entry);
                     log.info("Restored task [{}] of type [{}] (createdAt={})",
                              def.taskName(), def.taskType(), createdAt);
@@ -179,20 +179,29 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     }
 
     private ScheduledTask scheduleByType(TaskDefinition def, Runnable runnable) {
+        Runnable wrapped = def.retryPolicy() != null
+                ? wrapRunnable(def.taskName(), runnable, def.retryPolicy())
+                : wrapRunnable(def.taskName(), runnable);
         return switch (def.taskType()) {
             case "CRON" -> {
                 if (def.timezone() != null) {
                     org.springframework.scheduling.support.CronTrigger trigger =
                             new org.springframework.scheduling.support.CronTrigger(
                                     def.cronExpression(), def.timezone());
-                    yield this.scheduleCronTask(new CronTask(wrapRunnable(def.taskName(), runnable), trigger));
+                    yield this.scheduleCronTask(new CronTask(wrapped, trigger));
                 }
-                yield this.scheduleCronTask(new CronTask(wrapRunnable(def.taskName(), runnable), def.cronExpression()));
+                yield this.scheduleCronTask(new CronTask(wrapped, def.cronExpression()));
             }
-            case "FIXED_DELAY" -> this.scheduleFixedDelayTask(new FixedDelayTask(
-                    wrapRunnable(def.taskName(), runnable), def.interval(), def.initialDelay()));
-            case "FIXED_RATE" -> this.scheduleFixedRateTask(new FixedRateTask(
-                    wrapRunnable(def.taskName(), runnable), def.interval(), def.initialDelay()));
+            case "FIXED_DELAY" -> {
+                limitsChecker.assertInterval(def.taskName(), def.interval());
+                yield this.scheduleFixedDelayTask(new FixedDelayTask(
+                        wrapped, def.interval(), def.initialDelay()));
+            }
+            case "FIXED_RATE" -> {
+                limitsChecker.assertInterval(def.taskName(), def.interval());
+                yield this.scheduleFixedRateTask(new FixedRateTask(
+                        wrapped, def.interval(), def.initialDelay()));
+            }
             default -> throw new IllegalArgumentException("Unknown task type: " + def.taskType());
         };
     }

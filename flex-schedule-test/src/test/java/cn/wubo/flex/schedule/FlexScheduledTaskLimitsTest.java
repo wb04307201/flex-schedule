@@ -1,6 +1,8 @@
 package cn.wubo.flex.schedule;
 
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
+import cn.wubo.flex.schedule.core.RetryPolicy;
+import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskDefinition;
 import cn.wubo.flex.schedule.core.TaskLimits;
 import cn.wubo.flex.schedule.core.TaskLimits.Mode;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
 
@@ -25,7 +28,12 @@ class FlexScheduledTaskLimitsTest {
     private FlexScheduledTaskRegistrar defaults;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
+        // Reset the static field to avoid stale references from other test classes
+        Field field = SpringContextUtils.class.getDeclaredField("applicationContext");
+        field.setAccessible(true);
+        field.set(null, null);
+
         scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(4);
         scheduler.setThreadNamePrefix("test-limits-");
@@ -278,6 +286,48 @@ class FlexScheduledTaskLimitsTest {
             assertEquals(originalCreated.truncatedTo(java.time.temporal.ChronoUnit.MILLIS),
                          restored.truncatedTo(java.time.temporal.ChronoUnit.MILLIS),
                          "Restored task should preserve original createdAt");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void restoreTasks_preservesRetryPolicyOnFixedDelayTask() {
+        RetryPolicy policy = RetryPolicy.fixed(3, Duration.ofSeconds(1));
+        Instant originalCreated = Instant.now().minus(Duration.ofDays(1));
+        TaskDefinition def = TaskDefinition.builder("retryRestore", "FIXED_DELAY")
+            .interval(Duration.ofMinutes(15))
+            .initialDelay(Duration.ZERO)
+            .beanName("testApplication")
+            .methodName("noOp")
+            .retryPolicy(policy)
+            .createdAt(originalCreated)
+            .updatedAt(originalCreated)
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertTrue(r.exists("retryRestore"), "Task should be restored");
+            RetryPolicy restored = r.getTaskDetail("retryRestore").orElseThrow().retryPolicy();
+            assertNotNull(restored, "Restored task should preserve retryPolicy");
+            assertEquals(policy.maxAttempts(), restored.maxAttempts());
+            assertEquals(policy.delay(), restored.delay());
+            assertEquals(policy.backoff(), restored.backoff());
         } finally {
             r.destroy();
         }
