@@ -322,6 +322,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_DELAY",
@@ -362,6 +363,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_RATE",
@@ -523,6 +525,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         final boolean[] existed = {false};
         taskMap.compute(taskName, (key, existing) -> {
@@ -551,6 +554,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         final boolean[] existed = {false};
         taskMap.compute(taskName, (key, existing) -> {
@@ -583,6 +587,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     public void schedule(String taskName, Duration delay, Runnable runnable) {
         validateTaskParams(taskName, runnable);
         Assert.notNull(delay, "delay must not be null");
+        validateIntervalLimit(taskName, delay);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "ONE_SHOT",
@@ -762,6 +767,14 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         if (!CronExpression.isValidExpression(cron)) {
             throw new IllegalArgumentException("Invalid cron expression: " + cron);
         }
+    }
+
+    /**
+     * Validates the task interval against the configured minimum trigger interval.
+     * No-op when limits are disabled or no min-interval is configured.
+     */
+    private void validateIntervalLimit(String taskName, Duration interval) {
+        limitsChecker.assertInterval(taskName, interval);
     }
 
     /**
