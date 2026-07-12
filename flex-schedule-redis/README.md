@@ -1,5 +1,9 @@
 # flex-schedule-redis
 
+<div align="right">
+  English | <a href="README.zh-CN.md">中文</a>
+</div>
+
 Redis-backed [`DistributedLock`](../flex-schedule/src/main/java/cn/wubo/flex/schedule/core/DistributedLock.java)
 implementation for cluster-aware scheduling.
 
