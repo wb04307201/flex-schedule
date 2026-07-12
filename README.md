@@ -283,6 +283,22 @@ taskService.setDistributedLock(myDistributedLock);
 
 The lock is acquired before each execution and released after (even on failure). If another node holds the lock, execution is skipped.
 
+#### Ready-made Redis implementation
+
+The `flex-schedule-redis` module ships with `RedisDistributedLock`, a Redis SETNX-based
+implementation that is safe by default (per-instance UUID ownership, TTL expiry).
+Add the dependency and the lock is auto-wired:
+
+```xml
+<dependency>
+    <groupId>io.github.wb04307201</groupId>
+    <artifactId>flex-schedule-redis</artifactId>
+</dependency>
+```
+
+See [flex-schedule-redis/README.md](flex-schedule-redis/README.md) for details and
+manual override examples.
+
 ### Micrometer Metrics
 
 Automatically active when `spring-boot-starter-actuator` is on the classpath:

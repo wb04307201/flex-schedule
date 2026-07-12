@@ -283,6 +283,20 @@ taskService.setDistributedLock(myDistributedLock);
 
 锁在每次执行前获取，执行后释放（即使失败也会释放）。如果另一个节点持有锁，则跳过执行。
 
+#### 开箱即用的 Redis 实现
+
+`flex-schedule-redis` 模块自带 `RedisDistributedLock`，基于 Redis SETNX 实现，
+默认安全（每个实例的 UUID 所有权、TTL 过期）。引入依赖后即可自动装配：
+
+```xml
+<dependency>
+    <groupId>io.github.wb04307201</groupId>
+    <artifactId>flex-schedule-redis</artifactId>
+</dependency>
+```
+
+详情和手动覆盖示例见 [flex-schedule-redis/README.md](flex-schedule-redis/README.md)。
+
 ### Micrometer 指标
 
 当 `spring-boot-starter-actuator` 在 classpath 时自动启用：
