@@ -1,5 +1,6 @@
 package cn.wubo.flex.schedule.autoconfigure;
 
+import cn.wubo.flex.schedule.core.TaskLimits;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -44,7 +45,7 @@ public class FlexScheduleProperties {
      * Global task scheduling limits.
      * <p>
      * Both {@code minInterval} and {@code maxLifetime} default to {@code null}, meaning no limit.
-     * When either is set, the {@link Mode} determines enforcement:
+     * When either is set, the {@link TaskLimits.Mode} determines enforcement:
      * STRICT throws on violation, WARN logs and allows, OFF disables all checks.
      */
     @Data
@@ -54,8 +55,6 @@ public class FlexScheduleProperties {
         /** Maximum task lifetime before auto-cancel. null = no limit. */
         private Duration maxLifetime;
         /** Enforcement mode. Default: STRICT. */
-        private Mode mode = Mode.STRICT;
-
-        public enum Mode { STRICT, WARN, OFF }
+        private TaskLimits.Mode mode = TaskLimits.Mode.STRICT;
     }
 }

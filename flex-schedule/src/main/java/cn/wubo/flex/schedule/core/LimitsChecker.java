@@ -41,15 +41,27 @@ final class LimitsChecker {
 
     /**
      * Lazy lifetime check. Returns true iff the task has exceeded max-lifetime and should be cancelled.
-     * Logs INFO when returning true.
+     * WARN mode logs a warning and returns false (mirroring {@link #assertInterval}'s WARN semantics —
+     * "log and allow"). STRICT mode logs INFO and returns true so the caller cancels.
      */
     boolean isExpired(String taskName, Instant createdAt) {
         if (!limits.isEnforcing() || !limits.hasMaxLifetime()) return false;
         Duration age = Duration.between(createdAt, Instant.now());
         if (age.compareTo(limits.maxLifetime()) < 0) return false;
 
-        log.info("Task [{}] exceeded max lifetime {} (age={}), auto-cancelling",
-                 taskName, limits.maxLifetime(), age);
-        return true;
+        switch (limits.mode()) {
+            case STRICT -> {
+                log.info("Task [{}] exceeded max lifetime {} (age={}), auto-cancelling",
+                         taskName, limits.maxLifetime(), age);
+                return true;
+            }
+            case WARN -> {
+                log.warn("Task [{}] exceeded max lifetime {} (age={}) — allowed due to mode=warn",
+                         taskName, limits.maxLifetime(), age);
+                return false;
+            }
+            case OFF -> { /* unreachable: isEnforcing() returned false above */ }
+        }
+        return false;
     }
 }

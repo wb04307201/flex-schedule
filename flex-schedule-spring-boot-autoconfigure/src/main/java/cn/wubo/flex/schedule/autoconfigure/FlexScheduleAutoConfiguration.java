@@ -58,14 +58,10 @@ public class FlexScheduleAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean(TaskLimits.class)
     public TaskLimits taskLimits(FlexScheduleProperties properties) {
         FlexScheduleProperties.Limits l = properties.getLimits();
-        TaskLimits.Mode mode = switch (l.getMode()) {
-            case STRICT -> TaskLimits.Mode.STRICT;
-            case WARN -> TaskLimits.Mode.WARN;
-            case OFF -> TaskLimits.Mode.OFF;
-        };
-        return new TaskLimits(l.getMinInterval(), l.getMaxLifetime(), mode);
+        return new TaskLimits(l.getMinInterval(), l.getMaxLifetime(), l.getMode());
     }
 
     @Bean(name = "flexScheduledTaskService")

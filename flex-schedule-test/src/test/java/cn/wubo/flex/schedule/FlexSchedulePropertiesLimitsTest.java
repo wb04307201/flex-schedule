@@ -2,6 +2,7 @@ package cn.wubo.flex.schedule;
 
 import cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties;
 import cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties.Limits;
+import cn.wubo.flex.schedule.core.TaskLimits;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -22,7 +23,7 @@ class FlexSchedulePropertiesLimitsTest {
             Limits limits = props.getLimits();
             assertThat(limits.getMinInterval()).isNull();
             assertThat(limits.getMaxLifetime()).isNull();
-            assertThat(limits.getMode()).isEqualTo(Limits.Mode.STRICT);
+            assertThat(limits.getMode()).isEqualTo(TaskLimits.Mode.STRICT);
         });
     }
 
@@ -36,7 +37,7 @@ class FlexSchedulePropertiesLimitsTest {
             Limits limits = ctx.getBean(FlexScheduleProperties.class).getLimits();
             assertThat(limits.getMinInterval()).isEqualTo(Duration.ofMinutes(10));
             assertThat(limits.getMaxLifetime()).isEqualTo(Duration.ofDays(7));
-            assertThat(limits.getMode()).isEqualTo(Limits.Mode.WARN);
+            assertThat(limits.getMode()).isEqualTo(TaskLimits.Mode.WARN);
         });
     }
 
@@ -44,7 +45,7 @@ class FlexSchedulePropertiesLimitsTest {
     void mode_offIsParsed() {
         runner.withPropertyValues("flex.schedule.limits.mode=off").run(ctx -> {
             assertThat(ctx.getBean(FlexScheduleProperties.class).getLimits().getMode())
-                .isEqualTo(Limits.Mode.OFF);
+                .isEqualTo(TaskLimits.Mode.OFF);
         });
     }
 

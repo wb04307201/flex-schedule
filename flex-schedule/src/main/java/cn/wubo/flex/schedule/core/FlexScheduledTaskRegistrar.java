@@ -462,6 +462,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
         Assert.notNull(retryPolicy, "retryPolicy must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_DELAY",
@@ -495,6 +496,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
         Assert.notNull(retryPolicy, "retryPolicy must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_RATE",
@@ -681,8 +683,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             return;
         }
         if (limitsChecker.isExpired(taskName, entry.createdAt())) {
-            cancel(taskName);
-            log.info("Task [{}] exceeded max lifetime during pause, cancelled instead of resumed", taskName);
+            // Atomic check-and-remove: only cancel if this entry is still the one in the map.
+            // A concurrent replaceXxxTask could have swapped it for a fresh entry; preserve that.
+            if (cancelIfCurrent(taskName, entry)) {
+                log.info("Task [{}] exceeded max lifetime during pause, cancelled instead of resumed", taskName);
+            } else {
+                log.debug("Task [{}] entry was replaced before resume could cancel; fresh entry preserved", taskName);
+            }
             return;
         }
         if (pausedTasks.remove(taskName)) {
@@ -714,6 +721,22 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         } else {
             log.warn("Task [{}] not found, cancel skipped", taskName);
         }
+    }
+
+    /**
+     * Atomic check-and-remove: cancels the task only if the entry currently in the map
+     * is still the supplied {@code expectedEntry}. Returns true if the task was cancelled.
+     * Used by {@link #resume(String)} so a concurrent {@code replaceXxxTask} swapping
+     * in a fresh entry is not accidentally cancelled by stale cancellation logic.
+     */
+    public boolean cancelIfCurrent(String taskName, ScheduledTaskEntry expectedEntry) {
+        if (taskMap.remove(taskName, expectedEntry)) {
+            expectedEntry.cancelAction().run();
+            pausedTasks.remove(taskName);
+            log.info("Cancelled task [{}]", taskName);
+            return true;
+        }
+        return false;
     }
 
     // ─── Query API ───────────────────────────────────────────────────
@@ -1042,7 +1065,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
 
     // ─── Entry Record ────────────────────────────────────────────────
 
-    record ScheduledTaskEntry(
+    public record ScheduledTaskEntry(
             Runnable cancelAction,
             String taskType,
             String schedule,

@@ -16,6 +16,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -114,6 +115,32 @@ class FlexScheduledTaskLimitsTest {
     void fixedRate_aboveMin_allowed() {
         assertDoesNotThrow(
             () -> strict.addFixedRateTask("t", Duration.ofMinutes(15), Duration.ZERO, () -> {}));
+    }
+
+    // ─── Min-interval on retry-aware overloads ──────────────────────
+
+    @Test
+    void fixedDelay_withRetry_belowMin_strictThrows() {
+        RetryPolicy policy = RetryPolicy.fixed(3, Duration.ofSeconds(1));
+        assertThrows(TaskLimitExceededException.class,
+            () -> strict.addFixedDelayTask("t", Duration.ofSeconds(5), Duration.ZERO, () -> {}, policy));
+        assertFalse(strict.exists("t"));
+    }
+
+    @Test
+    void fixedDelay_withRetry_atMin_allowed() {
+        RetryPolicy policy = RetryPolicy.fixed(3, Duration.ofSeconds(1));
+        assertDoesNotThrow(
+            () -> strict.addFixedDelayTask("t", Duration.ofMinutes(10), Duration.ZERO, () -> {}, policy));
+        assertTrue(strict.exists("t"));
+    }
+
+    @Test
+    void fixedRate_withRetry_belowMin_strictThrows() {
+        RetryPolicy policy = RetryPolicy.fixed(3, Duration.ofSeconds(1));
+        assertThrows(TaskLimitExceededException.class,
+            () -> strict.addFixedRateTask("t", Duration.ofSeconds(5), Duration.ZERO, () -> {}, policy));
+        assertFalse(strict.exists("t"));
     }
 
     // ─── Min-interval on ONE_SHOT ───────────────────────────────────
@@ -228,6 +255,63 @@ class FlexScheduledTaskLimitsTest {
         } finally {
             r.destroy();
         }
+    }
+
+    // ─── Atomic check-and-remove in resume path (race fix) ─────────
+
+    @Test
+    void cancelIfCurrent_doesNotRemoveReplacedTask() throws Exception {
+        // Setup: add a task, capture its entry, replace the task (fresh entry),
+        // then call cancelIfCurrent with the stale captured entry.
+        // The fresh entry must survive — atomic check-and-remove must NOT match stale.
+        try {
+            defaults.addFixedDelayTask("foo", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            FlexScheduledTaskRegistrar.ScheduledTaskEntry captured = defaults.getTaskDetail("foo").orElseThrow() != null
+                ? readEntry(defaults, "foo")
+                : null;
+            assertNotNull(captured);
+
+            defaults.replaceFixedDelayTask("foo", Duration.ofMinutes(20), Duration.ZERO, () -> {});
+
+            // Now invoke the atomic cancelIfCurrent with the stale captured entry
+            boolean cancelled = defaults.cancelIfCurrent("foo", captured);
+
+            assertFalse(cancelled, "cancelIfCurrent must return false when entry is stale");
+            assertTrue(defaults.exists("foo"), "Freshly replaced task must survive cancelIfCurrent");
+        } finally {
+            defaults.destroy();
+            defaults = new FlexScheduledTaskRegistrar(scheduler, 5);
+        }
+    }
+
+    @Test
+    void cancelIfCurrent_removesMatchingEntry() throws Exception {
+        try {
+            defaults.addFixedDelayTask("foo", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            FlexScheduledTaskRegistrar.ScheduledTaskEntry current = readEntry(defaults, "foo");
+
+            boolean cancelled = defaults.cancelIfCurrent("foo", current);
+
+            assertTrue(cancelled, "cancelIfCurrent must return true when entry matches");
+            assertFalse(defaults.exists("foo"));
+        } finally {
+            defaults.destroy();
+            defaults = new FlexScheduledTaskRegistrar(scheduler, 5);
+        }
+    }
+
+    /**
+     * Reads the ScheduledTaskEntry for a given task via reflection. Package-private helpers
+     * aren't otherwise accessible from this test package.
+     */
+    private FlexScheduledTaskRegistrar.ScheduledTaskEntry readEntry(
+            FlexScheduledTaskRegistrar r, String taskName) throws Exception {
+        Field taskMapField = FlexScheduledTaskRegistrar.class.getDeclaredField("taskMap");
+        taskMapField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, FlexScheduledTaskRegistrar.ScheduledTaskEntry> taskMap =
+            (Map<String, FlexScheduledTaskRegistrar.ScheduledTaskEntry>) taskMapField.get(r);
+        return taskMap.get(taskName);
     }
 
     // ─── createdAt preservation ────────────────────────────────────

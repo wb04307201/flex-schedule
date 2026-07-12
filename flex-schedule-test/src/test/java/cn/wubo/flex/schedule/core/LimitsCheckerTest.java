@@ -91,4 +91,19 @@ class LimitsCheckerTest {
         LimitsChecker checker = new LimitsChecker(new TaskLimits(null, Duration.ofSeconds(1), Mode.STRICT));
         assertTrue(checker.isExpired("t", Instant.now().minus(Duration.ofMillis(1100))));
     }
+
+    // ─── WARN mode symmetry with assertInterval ─────────────────────
+
+    @Test
+    void isExpired_warnMode_returnsFalse_allowsTask() {
+        // WARN mode should "log and allow", matching assertInterval's WARN semantics.
+        LimitsChecker checker = new LimitsChecker(new TaskLimits(null, Duration.ofDays(7), Mode.WARN));
+        assertFalse(checker.isExpired("t", Instant.now().minus(Duration.ofDays(8))));
+    }
+
+    @Test
+    void isExpired_warnMode_youngTask_returnsFalse() {
+        LimitsChecker checker = new LimitsChecker(new TaskLimits(null, Duration.ofDays(7), Mode.WARN));
+        assertFalse(checker.isExpired("t", Instant.now().minus(Duration.ofDays(1))));
+    }
 }
