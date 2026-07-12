@@ -784,14 +784,20 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      */
     private Runnable instrument(String taskName, Runnable delegate) {
         return () -> {
-            // Check if task is paused
+            // 1. Lazy lifetime check
+            ScheduledTaskEntry entry = taskMap.get(taskName);
+            if (entry != null && limitsChecker.isExpired(taskName, entry.createdAt())) {
+                cancel(taskName);
+                return;
+            }
+
+            // 2. Check if task is paused
             if (pausedTasks.contains(taskName)) {
                 log.debug("Task [{}] is paused, skipping execution", taskName);
                 return;
             }
 
             // Check distributed lock for cluster-aware scheduling
-            ScheduledTaskEntry entry = taskMap.get(taskName);
             Duration lockDuration = resolveLockDuration(entry);
             if (!distributedLock.tryLock(taskName, lockDuration)) {
                 log.debug("Task [{}] could not acquire distributed lock, skipping execution", taskName);

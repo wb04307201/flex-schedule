@@ -154,4 +154,49 @@ class FlexScheduledTaskLimitsTest {
             () -> strict.replaceCronTask("neverExisted", "* * * * * *", () -> {}));
         assertTrue(strict.exists("neverExisted"));
     }
+
+    // ─── Max-lifetime lazy check ────────────────────────────────────
+
+    @Test
+    void maxLifetime_fixedDelay_cancelledOnNextFirePastLifetime() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(300), Mode.STRICT));
+        try {
+            r.addFixedDelayTask("shortLived", Duration.ofMillis(100), Duration.ZERO, () -> {});
+
+            // Wait past the lifetime cap (initialDelay 0 + 100ms interval; need >300ms total)
+            Thread.sleep(500);
+
+            // Trigger one more fire — instrument() should detect expiry and cancel
+            // Force a re-schedule isn't trivial; instead, verify by directly invoking getTaskDetail
+            // and checking isExpired via LimitsChecker. For this test, we rely on direct helper:
+            // Simulate the fire path by calling getTaskDetail and waiting for the scheduled runnable.
+            // The scheduled runnable itself will call cancel when it fires next.
+            // We give it time to fire at least once post-expiry.
+            Thread.sleep(300);
+
+            // After sufficient time, either the task already fired and cancelled, or it still
+            // exists but the next fire will cancel. Use a generous wait.
+            long deadline = System.currentTimeMillis() + 2000;
+            while (r.exists("shortLived") && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(r.exists("shortLived"), "Task should have been auto-cancelled past max-lifetime");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void maxLifetime_nullConfig_doesNotCancel() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, null, Mode.STRICT));
+        try {
+            r.addFixedDelayTask("forever", Duration.ofMillis(100), Duration.ZERO, () -> {});
+            Thread.sleep(400);
+            assertTrue(r.exists("forever"));
+        } finally {
+            r.destroy();
+        }
+    }
 }
