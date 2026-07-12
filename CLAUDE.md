@@ -73,6 +73,9 @@ Multi-module Spring Boot Starter library providing flex scheduling thread pool m
 | `flex.schedule.await-termination-seconds` | `30` | Graceful shutdown timeout |
 | `flex.schedule.endpoint.write-enabled` | `false` | Enable POST/DELETE on actuator endpoint |
 | `flex.schedule.endpoint.allowed-beans` | `[]` | Bean allowlist for endpoint write operations |
+| `flex.schedule.limits.min-interval` | (null) | Minimum trigger interval for FIXED_DELAY/FIXED_RATE/ONE_SHOT. null = no limit. |
+| `flex.schedule.limits.max-lifetime` | (null) | Maximum task lifetime before auto-cancel for FIXED_DELAY/FIXED_RATE/CRON. null = no limit. |
+| `flex.schedule.limits.mode` | `strict` | Enforcement mode: strict (throw), warn (log), off (skip). |
 
 ## Important Design Decisions
 
@@ -83,3 +86,4 @@ Multi-module Spring Boot Starter library providing flex scheduling thread pool m
 5. **Distributed lock**: Acquired per-execution in `instrument()`, released in `finally`. Lock duration defaults to task interval or 30s for cron.
 6. **Execution history**: `InMemoryExecutionHistory` uses `ConcurrentLinkedDeque` per task with configurable max size (default 100).
 7. **Timeout**: `TimeoutRunnable` wraps delegate in a separate single-thread executor with `Future.get(timeout)`.
+8. **Task scheduling limits**: `LimitsChecker` validates interval at registration and lazily checks max-lifetime at fire time. `resume()` re-checks expiration for paused tasks. `replaceXxxTask` resets `createdAt`. `restoreTasks()` preserves persisted `createdAt` for cross-restart lifetime accounting. Mode `STRICT/WARN/OFF` is per-config, not per-task.

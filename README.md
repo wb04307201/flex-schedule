@@ -295,6 +295,39 @@ Automatically active when `spring-boot-starter-actuator` is on the classpath:
 
 Integrates with Prometheus, Grafana, and any Micrometer-compatible system. Zero overhead when Micrometer is absent.
 
+### Task Scheduling Limits
+
+Constrain trigger frequency and lifetime globally via `flex.schedule.limits`, to prevent thread pool exhaustion or stale temporary tasks.
+
+```yaml
+flex:
+  schedule:
+    limits:
+      min-interval: PT10M      # Minimum trigger interval; null = no limit
+      max-lifetime: P7D        # Maximum task lifetime; null = no limit
+      mode: strict             # strict | warn | off; default strict
+```
+
+| Mode | On violation |
+|------|-------------|
+| `strict` | Throws `TaskLimitExceededException` on registration; expired tasks are silently cancelled + logged |
+| `warn`   | Logs WARN and allows; expired tasks are cancelled (cannot be allowed to live forever) |
+| `off`    | Skips all checks |
+
+**Scope**:
+
+| Limit | Applies to |
+|-------|-----------|
+| `min-interval` | `FIXED_DELAY` / `FIXED_RATE` / `ONE_SHOT` (cron exempt) |
+| `max-lifetime` | `FIXED_DELAY` / `FIXED_RATE` / `CRON` (one-shot exempt — runs once) |
+
+**Key behaviors**:
+
+- **Lazy expiry check**: every fire compares `now - createdAt` against `max-lifetime`; if exceeded, current fire is skipped and future fires are cancelled
+- **Paused task expiry**: tasks paused past their lifetime are not auto-cancelled; next `resume()` detects and cancels
+- **`replaceXxxTask` resets `createdAt`**: lifetime clock restarts
+- **Persistence preserves `createdAt`**: cumulative lifetime across restart (3d before + 4d after ≈ expired)
+
 ### Actuator Endpoint
 
 Active when `spring-boot-starter-actuator` + `spring-boot-starter-web` are on the classpath.
