@@ -332,4 +332,165 @@ class FlexScheduledTaskLimitsTest {
             r.destroy();
         }
     }
+
+    // ─── replaceXxx resets createdAt (Gap 1) ─────────────────────────
+
+    @Test
+    void replaceFixedDelayTask_resetsCreatedAt() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            r.addFixedDelayTask("t", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            Instant beforeReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            Thread.sleep(20);
+            r.replaceFixedDelayTask("t", Duration.ofMinutes(20), Duration.ZERO, () -> {});
+            Instant afterReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            assertTrue(afterReplace.isAfter(beforeReplace),
+                "replaceFixedDelayTask should reset createdAt to a later instant");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void replaceFixedRateTask_resetsCreatedAt() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            r.addFixedRateTask("t", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            Instant beforeReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            Thread.sleep(20);
+            r.replaceFixedRateTask("t", Duration.ofMinutes(20), Duration.ZERO, () -> {});
+            Instant afterReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            assertTrue(afterReplace.isAfter(beforeReplace),
+                "replaceFixedRateTask should reset createdAt to a later instant");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    // ─── replaceXxx + lifetime renewal (Gap 2) ───────────────────────
+
+    @Test
+    void replaceFixedDelayTask_expiredTask_renewsLifetime() throws InterruptedException {
+        // Set max-lifetime to 200ms; add a task; wait past lifetime; replace it.
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(200), Mode.STRICT));
+        try {
+            r.addFixedDelayTask("expired", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            // Wait past the lifetime cap
+            Thread.sleep(300);
+
+            // Replace — should succeed and reset createdAt (the entry is fresh)
+            r.replaceFixedDelayTask("expired", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            assertTrue(r.exists("expired"),
+                "Replaced task should be in the map even when previous instance had expired");
+            // createdAt should be very recent (renewed)
+            Instant renewedCreatedAt = r.getTaskDetail("expired").orElseThrow().createdAt();
+            assertTrue(renewedCreatedAt.isAfter(Instant.now().minus(Duration.ofSeconds(2))),
+                "Replaced task should have fresh createdAt");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void replaceFixedRateTask_expiredTask_renewsLifetime() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(200), Mode.STRICT));
+        try {
+            r.addFixedRateTask("expired", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            Thread.sleep(300);
+
+            r.replaceFixedRateTask("expired", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+            assertTrue(r.exists("expired"),
+                "Replaced task should be in the map even when previous instance had expired");
+            Instant renewedCreatedAt = r.getTaskDetail("expired").orElseThrow().createdAt();
+            assertTrue(renewedCreatedAt.isAfter(Instant.now().minus(Duration.ofSeconds(2))),
+                "Replaced task should have fresh createdAt");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    // ─── WARN mode interval via registrar API (Gap 3) ─────────────────
+
+    @Test
+    void addFixedDelayTask_warnMode_belowMin_logsAndAllows() {
+        // WARN mode should allow below-min intervals with a log message (no throw)
+        assertDoesNotThrow(
+            () -> warn.addFixedDelayTask("belowMin", Duration.ofSeconds(5), Duration.ZERO, () -> {}));
+        assertTrue(warn.exists("belowMin"),
+            "WARN mode should register the task even when below min-interval");
+    }
+
+    // ─── restoreTasks interval validation (Gap 4) ────────────────────
+
+    @Test
+    void restoreTasks_fixedDelay_strictRejectsBelowMin() {
+        // Persist a task with 100ms interval; set limits to 10min STRICT; restore; expect rejection.
+        TaskDefinition def = TaskDefinition.builder("shortDelay", "FIXED_DELAY")
+            .interval(Duration.ofMillis(100))
+            .initialDelay(Duration.ZERO)
+            .beanName("testApplication")
+            .methodName("noOp")
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        TaskLimits strictLimits = new TaskLimits(Duration.ofMinutes(10), null, Mode.STRICT);
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5, strictLimits);
+        try {
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertFalse(r.exists("shortDelay"),
+                "STRICT mode should reject restoring a task with below-min interval");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void restoreTasks_fixedDelay_warnAllowsBelowMin() {
+        // Same setup but WARN mode — restore should succeed with a log, task should be in map.
+        TaskDefinition def = TaskDefinition.builder("shortDelay", "FIXED_DELAY")
+            .interval(Duration.ofMillis(100))
+            .initialDelay(Duration.ZERO)
+            .beanName("testApplication")
+            .methodName("noOp")
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        TaskLimits warnLimits = new TaskLimits(Duration.ofMinutes(10), null, Mode.WARN);
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5, warnLimits);
+        try {
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertTrue(r.exists("shortDelay"),
+                "WARN mode should allow restoring a task with below-min interval");
+        } finally {
+            r.destroy();
+        }
+    }
 }
