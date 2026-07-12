@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule;
 
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
+import cn.wubo.flex.schedule.core.TaskDefinition;
 import cn.wubo.flex.schedule.core.TaskLimits;
 import cn.wubo.flex.schedule.core.TaskLimits.Mode;
 import cn.wubo.flex.schedule.exception.TaskLimitExceededException;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.time.Duration;
+import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -215,6 +217,67 @@ class FlexScheduledTaskLimitsTest {
             r.resume("oldPaused");
             assertFalse(r.exists("oldPaused"));
             assertFalse(r.isPaused("oldPaused"));
+        } finally {
+            r.destroy();
+        }
+    }
+
+    // ─── createdAt preservation ────────────────────────────────────
+
+    @Test
+    void replaceCronTask_resetsCreatedAt() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            r.addCronTask("t", "0 * * * * *", () -> {});
+            Instant beforeReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            Thread.sleep(20);
+            r.replaceCronTask("t", "0 0 * * * *", () -> {});
+            Instant afterReplace = r.getTaskDetail("t").orElseThrow().createdAt();
+            assertTrue(afterReplace.isAfter(beforeReplace),
+                "replaceCronTask should reset createdAt to a later instant");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void restoreTasks_preservesCreatedAtAcrossRestart() {
+        Instant originalCreated = Instant.now().minus(Duration.ofDays(3));
+        TaskDefinition def = TaskDefinition.builder("daily", "CRON")
+            .cronExpression("0 0 * * * *")
+            .beanName("testApplication")
+            .methodName("noOp")
+            .createdAt(originalCreated)
+            .updatedAt(originalCreated)
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            // Spring's BeanMethodRunnable requires the bean to be in the application context;
+            // restoreTasks runs synchronously and does NOT actually invoke the method — it only
+            // constructs the Runnable. The task will be registered as long as the bean is
+            // resolvable. For this test we use the singleton testApplication from TestApplication
+            // via a programmatic lookup.
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertTrue(r.exists("daily"), "Task should be restored");
+            Instant restored = r.getTaskDetail("daily").orElseThrow().createdAt();
+            assertEquals(originalCreated.truncatedTo(java.time.temporal.ChronoUnit.MILLIS),
+                         restored.truncatedTo(java.time.temporal.ChronoUnit.MILLIS),
+                         "Restored task should preserve original createdAt");
         } finally {
             r.destroy();
         }

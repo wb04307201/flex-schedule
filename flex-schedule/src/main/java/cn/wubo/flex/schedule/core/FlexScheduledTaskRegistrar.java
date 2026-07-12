@@ -136,42 +136,65 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                     continue;
                 }
 
-                switch (def.taskType()) {
-                    case "CRON" -> {
-                        if (def.timezone() != null) {
-                            addCronTask(def.taskName(), def.cronExpression(), def.timezone(), runnable);
-                        } else if (def.retryPolicy() != null) {
-                            addCronTask(def.taskName(), def.cronExpression(), runnable, def.retryPolicy());
-                        } else {
-                            addCronTask(def.taskName(), def.cronExpression(), runnable);
-                        }
-                    }
-                    case "FIXED_DELAY" -> {
-                        if (def.retryPolicy() != null) {
-                            addFixedDelayTask(def.taskName(), def.interval(), def.initialDelay(), runnable, def.retryPolicy());
-                        } else {
-                            addFixedDelayTask(def.taskName(), def.interval(), def.initialDelay(), runnable);
-                        }
-                    }
-                    case "FIXED_RATE" -> {
-                        if (def.retryPolicy() != null) {
-                            addFixedRateTask(def.taskName(), def.interval(), def.initialDelay(), runnable, def.retryPolicy());
-                        } else {
-                            addFixedRateTask(def.taskName(), def.interval(), def.initialDelay(), runnable);
-                        }
-                    }
-                    default -> log.warn("Unknown task type [{}] for task [{}]", def.taskType(), def.taskName());
+                Instant createdAt = def.createdAt() != null ? def.createdAt() : Instant.now();
+                ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, def.taskType(),
+                        describeSchedule(def), null, false, createdAt);
+                ScheduledTaskEntry existing = taskMap.putIfAbsent(def.taskName(), placeholder);
+                if (existing != null) {
+                    log.warn("Task [{}] already exists, restore skipped", def.taskName());
+                    continue;
+                }
+
+                try {
+                    ScheduledTask scheduledTask = scheduleByType(def, runnable);
+                    ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel,
+                            def.taskType(), describeSchedule(def), null, false, createdAt);
+                    taskMap.put(def.taskName(), entry);
+                    log.info("Restored task [{}] of type [{}] (createdAt={})",
+                             def.taskName(), def.taskType(), createdAt);
+                } catch (Exception e) {
+                    taskMap.remove(def.taskName());
+                    throw e;
                 }
 
                 if (def.paused()) {
                     pause(def.taskName());
                 }
-
-                log.info("Restored task [{}] of type [{}]", def.taskName(), def.taskType());
             } catch (Exception e) {
                 log.error("Failed to restore task [{}]: {}", def.taskName(), e.getMessage(), e);
             }
         }
+    }
+
+    private String describeSchedule(TaskDefinition def) {
+        return switch (def.taskType()) {
+            case "CRON" -> def.cronExpression() != null && def.timezone() != null
+                    ? def.cronExpression() + " [" + def.timezone().getId() + "]"
+                    : def.cronExpression();
+            case "FIXED_DELAY", "FIXED_RATE" ->
+                    def.interval() + "/" + def.initialDelay();
+            case "ONE_SHOT" -> "delay=" + def.delay();
+            default -> "";
+        };
+    }
+
+    private ScheduledTask scheduleByType(TaskDefinition def, Runnable runnable) {
+        return switch (def.taskType()) {
+            case "CRON" -> {
+                if (def.timezone() != null) {
+                    org.springframework.scheduling.support.CronTrigger trigger =
+                            new org.springframework.scheduling.support.CronTrigger(
+                                    def.cronExpression(), def.timezone());
+                    yield this.scheduleCronTask(new CronTask(wrapRunnable(def.taskName(), runnable), trigger));
+                }
+                yield this.scheduleCronTask(new CronTask(wrapRunnable(def.taskName(), runnable), def.cronExpression()));
+            }
+            case "FIXED_DELAY" -> this.scheduleFixedDelayTask(new FixedDelayTask(
+                    wrapRunnable(def.taskName(), runnable), def.interval(), def.initialDelay()));
+            case "FIXED_RATE" -> this.scheduleFixedRateTask(new FixedRateTask(
+                    wrapRunnable(def.taskName(), runnable), def.interval(), def.initialDelay()));
+            default -> throw new IllegalArgumentException("Unknown task type: " + def.taskType());
+        };
     }
 
     /**
