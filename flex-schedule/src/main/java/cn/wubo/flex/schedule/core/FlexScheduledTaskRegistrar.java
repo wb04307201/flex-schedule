@@ -30,6 +30,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     private volatile ExecutionHistory executionHistory = ExecutionHistory.NOOP;
     private volatile DistributedLock distributedLock = DistributedLock.NOOP;
     private volatile TaskRepository taskRepository = new InMemoryTaskRepository();
+    private final LimitsChecker limitsChecker;
     private volatile ExecutorService asyncListenerExecutor = java.util.concurrent.Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "async-listener");
         t.setDaemon(true);
@@ -37,9 +38,14 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     });
 
     public FlexScheduledTaskRegistrar(ThreadPoolTaskScheduler taskScheduler, long awaitTerminationSeconds) {
+        this(taskScheduler, awaitTerminationSeconds, TaskLimits.DISABLED);
+    }
+
+    public FlexScheduledTaskRegistrar(ThreadPoolTaskScheduler taskScheduler, long awaitTerminationSeconds, TaskLimits limits) {
         super();
         this.setScheduler(taskScheduler);
         this.awaitTerminationSeconds = awaitTerminationSeconds;
+        this.limitsChecker = new LimitsChecker(limits);
     }
 
     /**
