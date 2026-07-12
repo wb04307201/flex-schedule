@@ -829,11 +829,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             // 1. Lazy lifetime check
             ScheduledTaskEntry entry = taskMap.get(taskName);
             if (entry != null && limitsChecker.isExpired(taskName, entry.createdAt())) {
-                // Only cancel if the entry we checked is still the one in the map.
-                // If compute() replaced it (via replaceXxxTask), skip — the replacement
-                // is the authoritative state, not a cancellation target.
-                if (taskMap.get(taskName) == entry) {
-                    cancel(taskName);
+                // Atomic check-and-remove: only cancel if our entry reference is still the
+                // one in the map. ConcurrentHashMap.remove(K, V) returns false if the
+                // current value differs (e.g., compute() replaced via replaceXxxTask).
+                if (taskMap.remove(taskName, entry)) {
+                    entry.cancelAction().run();
+                    pausedTasks.remove(taskName);
+                    log.info("Cancelled task [{}]", taskName);
                 }
                 return;
             }
