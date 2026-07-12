@@ -643,6 +643,16 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      */
     public void resume(String taskName) {
         Assert.hasText(taskName, "taskName must not be empty");
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null) {
+            log.warn("Task [{}] not found, resume skipped", taskName);
+            return;
+        }
+        if (limitsChecker.isExpired(taskName, entry.createdAt())) {
+            cancel(taskName);
+            log.info("Task [{}] exceeded max lifetime during pause, cancelled instead of resumed", taskName);
+            return;
+        }
         if (pausedTasks.remove(taskName)) {
             log.info("Resumed task [{}]", taskName);
         } else {

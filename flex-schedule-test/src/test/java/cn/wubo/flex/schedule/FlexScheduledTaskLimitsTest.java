@@ -199,4 +199,24 @@ class FlexScheduledTaskLimitsTest {
             r.destroy();
         }
     }
+
+    @Test
+    void resume_pausedTaskPastLifetime_cancelsInsteadOfResuming() throws InterruptedException {
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(200), Mode.STRICT));
+        try {
+            r.addFixedDelayTask("oldPaused", Duration.ofSeconds(60), Duration.ZERO, () -> {});
+            r.pause("oldPaused");
+
+            // wait past max-lifetime
+            Thread.sleep(400);
+
+            // attempt resume — should cancel instead
+            r.resume("oldPaused");
+            assertFalse(r.exists("oldPaused"));
+            assertFalse(r.isPaused("oldPaused"));
+        } finally {
+            r.destroy();
+        }
+    }
 }
