@@ -269,9 +269,7 @@ class FlexScheduledTaskLimitsTest {
         // The fresh entry must survive — atomic check-and-remove must NOT match stale.
         try {
             defaults.addFixedDelayTask("foo", Duration.ofMinutes(15), Duration.ZERO, () -> {});
-            FlexScheduledTaskRegistrar.ScheduledTaskEntry captured = defaults.getTaskDetail("foo").orElseThrow() != null
-                ? readEntry(defaults, "foo")
-                : null;
+            FlexScheduledTaskRegistrar.ScheduledTaskEntry captured = readEntry(defaults, "foo");
             assertNotNull(captured);
 
             defaults.replaceFixedDelayTask("foo", Duration.ofMinutes(20), Duration.ZERO, () -> {});

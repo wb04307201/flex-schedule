@@ -90,4 +90,62 @@ class MicrometerMetricsRecorderTest {
         assertEquals(1.0, counterA.count());
         assertEquals(1.0, counterB.count());
     }
+
+    // ─── repeated execution + supplier re-registration safety ──────
+
+    @Test
+    void recordExecution_repeated_thousandsOfTimes_doesNotReRegisterMeters() {
+        // The counter/timer caches must reuse the same meter across calls.
+        // Calling recordExecution many times for the same (task, type, result) must
+        // produce a single Counter instance — no "already registered" exceptions,
+        // no duplicate meters in the registry.
+        for (int i = 0; i < 5_000; i++) {
+            recorder.recordExecution("hot", "FIXED_DELAY", Duration.ofMillis(10), true);
+        }
+
+        long counterCount = registry.getMeters().stream()
+                .filter(m -> "flex.schedule.task.executions".equals(m.getId().getName()))
+                .count();
+        long timerCount = registry.getMeters().stream()
+                .filter(m -> "flex.schedule.task.duration".equals(m.getId().getName()))
+                .count();
+
+        assertEquals(1, counterCount, "Counter must be cached, not re-registered per call");
+        assertEquals(1, timerCount, "Timer must be cached, not re-registered per call");
+
+        Counter counter = registry.find("flex.schedule.task.executions")
+                .tag("taskName", "hot")
+                .tag("taskType", "FIXED_DELAY")
+                .tag("result", "success")
+                .counter();
+        assertEquals(5_000.0, counter.count());
+    }
+
+    @Test
+    void setActiveTaskCountSupplier_calledTwice_firstSupplierWins() {
+        // SimpleMeterRegistry de-duplicates meters by name; calling
+        // setActiveTaskCountSupplier twice keeps the FIRST supplier.
+        // This test pins that current behavior so any change is intentional.
+        recorder.setActiveTaskCountSupplier(() -> 10);
+        recorder.setActiveTaskCountSupplier(() -> 42);
+
+        Gauge gauge = registry.find("flex.schedule.active.tasks").gauge();
+        assertNotNull(gauge);
+        assertEquals(10.0, gauge.value(),
+            "First-registered supplier is retained on subsequent calls");
+    }
+
+    @Test
+    void setActiveTaskCountSupplier_gaugeReflectsLiveChanges() {
+        java.util.concurrent.atomic.AtomicInteger live = new java.util.concurrent.atomic.AtomicInteger(0);
+        recorder.setActiveTaskCountSupplier(live::get);
+
+        Gauge gauge = registry.find("flex.schedule.active.tasks").gauge();
+        assertNotNull(gauge);
+        assertEquals(0.0, gauge.value());
+
+        live.set(7);
+        assertEquals(7.0, gauge.value(),
+            "Gauge must poll the supplier each time it's read, not capture a snapshot");
+    }
 }
