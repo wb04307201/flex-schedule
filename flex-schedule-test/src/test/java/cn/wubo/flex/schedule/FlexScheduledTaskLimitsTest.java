@@ -186,8 +186,10 @@ class FlexScheduledTaskLimitsTest {
     }
 
     @Test
-    void replaceCron_belowMin_strictThrows() {
-        // cron is exempt from min-interval, so replace-cron also exempt
+    void replaceCron_belowMin_isAllowed_becauseCronIsExempt() {
+        // CRON tasks are exempt from min-interval enforcement, so replaceCronTask must NOT
+        // throw even when the new cron expression would tick faster than the configured
+        // min-interval would otherwise allow.
         assertDoesNotThrow(
             () -> strict.replaceCronTask("neverExisted", "* * * * * *", () -> {}));
         assertTrue(strict.exists("neverExisted"));

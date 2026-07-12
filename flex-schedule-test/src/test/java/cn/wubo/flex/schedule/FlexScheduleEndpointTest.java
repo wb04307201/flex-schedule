@@ -243,4 +243,87 @@ class FlexScheduleEndpointTest {
         List<TaskInfo> tasks = restrictedEndpoint.listTasks();
         assertNotNull(tasks);
     }
+
+    // ─── pauseTask / resumeTask ───────────────────────────────────
+
+    @Test
+    void pauseTask_existingTask_returnsStatusAndPausesIt() {
+        service.addFixedDelayTask("p1", 10, 0, () -> {});
+
+        Object result = endpoint.pauseTask("p1");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertEquals("paused", map.get("status"));
+        assertEquals("p1", map.get("taskName"));
+        assertTrue(registrar.isPaused("p1"));
+    }
+
+    @Test
+    void pauseTask_nonexistentTask_returnsErrorMap() {
+        Object result = endpoint.pauseTask("ghost");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertTrue(map.get("error").toString().contains("ghost"));
+    }
+
+    @Test
+    void pauseTask_writeDisabled_returnsError() {
+        EndpointAccessControl disabled = new DefaultEndpointAccessControl(false, Set.of());
+        FlexScheduleEndpoint restricted = new FlexScheduleEndpoint(service, disabled);
+        service.addFixedDelayTask("p2", 10, 0, () -> {});
+
+        Object result = restricted.pauseTask("p2");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertNotNull(map.get("error"));
+        assertFalse(registrar.isPaused("p2"));
+    }
+
+    @Test
+    void resumeTask_pausedTask_returnsStatusAndResumesIt() {
+        service.addFixedDelayTask("r1", 10, 0, () -> {});
+        service.pause("r1");
+        assertTrue(registrar.isPaused("r1"));
+
+        Object result = endpoint.resumeTask("r1");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertEquals("resumed", map.get("status"));
+        assertEquals("r1", map.get("taskName"));
+        assertFalse(registrar.isPaused("r1"));
+    }
+
+    @Test
+    void resumeTask_nonexistentTask_returnsErrorMap() {
+        Object result = endpoint.resumeTask("missing");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertTrue(map.get("error").toString().contains("missing"));
+    }
+
+    @Test
+    void resumeTask_writeDisabled_returnsError() {
+        EndpointAccessControl disabled = new DefaultEndpointAccessControl(false, Set.of());
+        FlexScheduleEndpoint restricted = new FlexScheduleEndpoint(service, disabled);
+        service.addFixedDelayTask("r2", 10, 0, () -> {});
+        service.pause("r2");
+
+        Object result = restricted.resumeTask("r2");
+
+        assertTrue(result instanceof Map);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertNotNull(map.get("error"));
+        assertTrue(registrar.isPaused("r2"));
+    }
 }
