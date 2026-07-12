@@ -17,6 +17,7 @@ import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -576,5 +577,213 @@ class FlexScheduledTaskLimitsTest {
         } finally {
             r.destroy();
         }
+    }
+
+    // ─── WARN mode integration tests (Priority A gaps) ────────────────
+
+    @Test
+    void resume_pausedTaskPastLifetime_warnMode_keepsTask() throws InterruptedException {
+        // My fix made LimitsChecker.isExpired return false for WARN mode. resume() should
+        // therefore NOT cancel the paused task; it should just remove it from pausedTasks
+        // and let the task keep firing past its configured lifetime.
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(200), Mode.WARN));
+        try {
+            r.addFixedDelayTask("warnOld", Duration.ofSeconds(60), Duration.ZERO, () -> {});
+            r.pause("warnOld");
+            Thread.sleep(400); // wait past max-lifetime
+
+            r.resume("warnOld");
+
+            assertTrue(r.exists("warnOld"), "WARN mode must keep the task alive past lifetime");
+            assertFalse(r.isPaused("warnOld"), "resume() should have unpaused it");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void instrument_lazyLifetimeCheck_warnMode_keepsTaskAlive() throws InterruptedException {
+        // The lazy check inside instrument() now respects mode: WARN returns false, so the
+        // task should NOT be auto-cancelled on its next fire after max-lifetime.
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5,
+            new TaskLimits(null, Duration.ofMillis(200), Mode.WARN));
+        try {
+            AtomicInteger fires = new AtomicInteger(0);
+            r.addFixedDelayTask("warnFire", Duration.ofMillis(50), Duration.ZERO, fires::incrementAndGet);
+            Thread.sleep(400); // wait past max-lifetime; multiple fires should have happened
+
+            assertTrue(r.exists("warnFire"), "WARN mode must NOT auto-cancel task past lifetime");
+            assertTrue(fires.get() >= 1, "Task should have fired at least once past lifetime under WARN");
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void schedule_oneShot_belowMin_warnMode_allows() {
+        // one-shot below-min in WARN mode should be allowed (log and allow)
+        assertDoesNotThrow(
+            () -> warn.schedule("oneShotWarn", Duration.ofSeconds(5), () -> {}));
+        assertTrue(warn.exists("oneShotWarn"));
+    }
+
+    @Test
+    void replaceFixedDelayTask_belowMin_doesNotMutateExistingEntry() {
+        // Add a valid task on the strict registrar, then attempt to replace with one below
+        // min-interval (10m). The original task must remain untouched.
+        strict.addFixedDelayTask("foo", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+        try {
+            assertThrows(TaskLimitExceededException.class,
+                () -> strict.replaceFixedDelayTask("foo", Duration.ofSeconds(5), Duration.ZERO, () -> {}));
+            assertTrue(strict.exists("foo"), "Original task must survive a failed replace");
+            // Schedule string must still reflect the original 15m interval, not the rejected 5s.
+            String schedule = strict.getTaskDetail("foo").orElseThrow().schedule();
+            String intervalPart = schedule.substring(0, schedule.indexOf('/'));
+            assertEquals(Duration.ofMinutes(15), Duration.parse(intervalPart),
+                "Original interval must be preserved when replace is rejected");
+        } finally {
+            strict.destroy();
+        }
+    }
+
+    // ─── LimitsChecker defensive: null-coalesce (Priority A gap 5) ──
+
+    @Test
+    void limitsChecker_nullLimits_treatedAsDisabled() throws Exception {
+        // LimitsChecker is package-private; access via Class.forName to avoid compile-time visibility.
+        Class<?> checkerClass = Class.forName("cn.wubo.flex.schedule.core.LimitsChecker");
+        java.lang.reflect.Constructor<?> ctor = checkerClass.getDeclaredConstructor(TaskLimits.class);
+        ctor.setAccessible(true);
+        Object checker = ctor.newInstance((TaskLimits) null);
+
+        java.lang.reflect.Method assertInterval = checkerClass.getDeclaredMethod(
+            "assertInterval", String.class, Duration.class);
+        assertInterval.setAccessible(true);
+        java.lang.reflect.Method isExpired = checkerClass.getDeclaredMethod(
+            "isExpired", String.class, Instant.class);
+        isExpired.setAccessible(true);
+
+        assertDoesNotThrow(() -> assertInterval.invoke(checker, "t", Duration.ofMillis(1)));
+        assertFalse((Boolean) isExpired.invoke(checker, "t", Instant.now().minus(Duration.ofDays(365))));
+    }
+
+    // ─── restoreTasks coverage for CRON / FIXED_RATE (Priority B gaps 6-7) ─
+
+    @Test
+    void restoreTasks_cron_succeeds() throws Exception {
+        TaskDefinition def = TaskDefinition.builder("cronDaily", "CRON")
+            .cronExpression("0 0 * * * *")
+            .beanName("testApplication")
+            .methodName("noOp")
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertTrue(r.exists("cronDaily"));
+            assertEquals("CRON", r.getTaskDetail("cronDaily").orElseThrow().taskType());
+        } finally {
+            r.destroy();
+        }
+    }
+
+    @Test
+    void restoreTasks_fixedRate_succeeds() throws Exception {
+        TaskDefinition def = TaskDefinition.builder("rateJob", "FIXED_RATE")
+            .interval(Duration.ofMinutes(10))
+            .initialDelay(Duration.ZERO)
+            .beanName("testApplication")
+            .methodName("noOp")
+            .build();
+        cn.wubo.flex.schedule.core.TaskRepository repo =
+            new cn.wubo.flex.schedule.core.InMemoryTaskRepository();
+        repo.save(def);
+
+        FlexScheduledTaskRegistrar r = new FlexScheduledTaskRegistrar(scheduler, 5);
+        try {
+            org.springframework.context.support.StaticApplicationContext ctx =
+                new org.springframework.context.support.StaticApplicationContext();
+            ctx.getBeanFactory().registerSingleton("testApplication",
+                cn.wubo.flex.schedule.TestApplication.getInstance());
+            ctx.refresh();
+            cn.wubo.flex.schedule.core.SpringContextUtils utils =
+                new cn.wubo.flex.schedule.core.SpringContextUtils();
+            utils.setApplicationContext(ctx);
+
+            r.setTaskRepository(repo);
+            r.restoreTasks();
+
+            assertTrue(r.exists("rateJob"));
+            assertEquals("FIXED_RATE", r.getTaskDetail("rateJob").orElseThrow().taskType());
+        } finally {
+            r.destroy();
+        }
+    }
+
+    // ─── Lifecycle defensive (Priority B gap 8) ────────────────────
+
+    @Test
+    void destroy_isIdempotent_secondCallDoesNotThrow() {
+        defaults.destroy();
+        assertDoesNotThrow(() -> defaults.destroy(),
+            "Second destroy() must be a safe no-op");
+    }
+
+    // ─── setX(null) defensive (Priority B gap 9) ────────────────────
+
+    @Test
+    void setMetricsRecorder_nullFallsBackToNoop() {
+        defaults.setMetricsRecorder(null);
+        // No public getter for metricsRecorder; behavior is verified by execution not throwing.
+        // Just ensure no NPE.
+        assertDoesNotThrow(() -> defaults.addFixedDelayTask(
+            "afterNull", Duration.ofMinutes(15), Duration.ZERO, () -> {}));
+    }
+
+    @Test
+    void setExecutionHistory_nullFallsBackToNoop() {
+        defaults.setExecutionHistory(null);
+        // After null setter, getter must return a non-null default (the NOOP instance)
+        assertNotNull(defaults.getExecutionHistory());
+    }
+
+    @Test
+    void setDistributedLock_nullFallsBackToNoop() {
+        defaults.setDistributedLock(null);
+        assertNotNull(defaults.getDistributedLock());
+    }
+
+    @Test
+    void setTaskRepository_nullFallsBackToInMemory() {
+        defaults.setTaskRepository(null);
+        assertNotNull(defaults.getTaskRepository());
+    }
+
+    @Test
+    void setAsyncListenerExecutor_nullFallsBackToDefault() {
+        defaults.setAsyncListenerExecutor(null);
+        // No public getter; just ensure no NPE on a subsequent operation.
+        assertDoesNotThrow(() -> defaults.addListener(
+            new cn.wubo.flex.schedule.core.TaskExecutionListener() {
+                @Override public void beforeExecution(String name) {}
+                @Override public void afterExecution(String name) {}
+                @Override public void onError(String name, Throwable error) {}
+                @Override public boolean isAsync() { return true; }
+            }));
     }
 }
