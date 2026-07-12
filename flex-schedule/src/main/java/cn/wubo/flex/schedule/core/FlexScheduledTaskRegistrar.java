@@ -30,6 +30,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     private volatile ExecutionHistory executionHistory = ExecutionHistory.NOOP;
     private volatile DistributedLock distributedLock = DistributedLock.NOOP;
     private volatile TaskRepository taskRepository = new InMemoryTaskRepository();
+    private final LimitsChecker limitsChecker;
     private volatile ExecutorService asyncListenerExecutor = java.util.concurrent.Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "async-listener");
         t.setDaemon(true);
@@ -37,9 +38,14 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     });
 
     public FlexScheduledTaskRegistrar(ThreadPoolTaskScheduler taskScheduler, long awaitTerminationSeconds) {
+        this(taskScheduler, awaitTerminationSeconds, TaskLimits.DISABLED);
+    }
+
+    public FlexScheduledTaskRegistrar(ThreadPoolTaskScheduler taskScheduler, long awaitTerminationSeconds, TaskLimits limits) {
         super();
         this.setScheduler(taskScheduler);
         this.awaitTerminationSeconds = awaitTerminationSeconds;
+        this.limitsChecker = new LimitsChecker(limits);
     }
 
     /**
@@ -130,42 +136,74 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                     continue;
                 }
 
-                switch (def.taskType()) {
-                    case "CRON" -> {
-                        if (def.timezone() != null) {
-                            addCronTask(def.taskName(), def.cronExpression(), def.timezone(), runnable);
-                        } else if (def.retryPolicy() != null) {
-                            addCronTask(def.taskName(), def.cronExpression(), runnable, def.retryPolicy());
-                        } else {
-                            addCronTask(def.taskName(), def.cronExpression(), runnable);
-                        }
-                    }
-                    case "FIXED_DELAY" -> {
-                        if (def.retryPolicy() != null) {
-                            addFixedDelayTask(def.taskName(), def.interval(), def.initialDelay(), runnable, def.retryPolicy());
-                        } else {
-                            addFixedDelayTask(def.taskName(), def.interval(), def.initialDelay(), runnable);
-                        }
-                    }
-                    case "FIXED_RATE" -> {
-                        if (def.retryPolicy() != null) {
-                            addFixedRateTask(def.taskName(), def.interval(), def.initialDelay(), runnable, def.retryPolicy());
-                        } else {
-                            addFixedRateTask(def.taskName(), def.interval(), def.initialDelay(), runnable);
-                        }
-                    }
-                    default -> log.warn("Unknown task type [{}] for task [{}]", def.taskType(), def.taskName());
+                Instant createdAt = def.createdAt() != null ? def.createdAt() : Instant.now();
+                ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, def.taskType(),
+                        describeSchedule(def), null, false, createdAt);
+                ScheduledTaskEntry existing = taskMap.putIfAbsent(def.taskName(), placeholder);
+                if (existing != null) {
+                    log.warn("Task [{}] already exists, restore skipped", def.taskName());
+                    continue;
+                }
+
+                try {
+                    ScheduledTask scheduledTask = scheduleByType(def, runnable);
+                    ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel,
+                            def.taskType(), describeSchedule(def), def.retryPolicy(), false, createdAt);
+                    taskMap.put(def.taskName(), entry);
+                    log.info("Restored task [{}] of type [{}] (createdAt={})",
+                             def.taskName(), def.taskType(), createdAt);
+                } catch (Exception e) {
+                    taskMap.remove(def.taskName());
+                    throw e;
                 }
 
                 if (def.paused()) {
                     pause(def.taskName());
                 }
-
-                log.info("Restored task [{}] of type [{}]", def.taskName(), def.taskType());
             } catch (Exception e) {
                 log.error("Failed to restore task [{}]: {}", def.taskName(), e.getMessage(), e);
             }
         }
+    }
+
+    private String describeSchedule(TaskDefinition def) {
+        return switch (def.taskType()) {
+            case "CRON" -> def.cronExpression() != null && def.timezone() != null
+                    ? def.cronExpression() + " [" + def.timezone().getId() + "]"
+                    : def.cronExpression();
+            case "FIXED_DELAY", "FIXED_RATE" ->
+                    def.interval() + "/" + def.initialDelay();
+            case "ONE_SHOT" -> "delay=" + def.delay();
+            default -> "";
+        };
+    }
+
+    private ScheduledTask scheduleByType(TaskDefinition def, Runnable runnable) {
+        Runnable wrapped = def.retryPolicy() != null
+                ? wrapRunnable(def.taskName(), runnable, def.retryPolicy())
+                : wrapRunnable(def.taskName(), runnable);
+        return switch (def.taskType()) {
+            case "CRON" -> {
+                if (def.timezone() != null) {
+                    org.springframework.scheduling.support.CronTrigger trigger =
+                            new org.springframework.scheduling.support.CronTrigger(
+                                    def.cronExpression(), def.timezone());
+                    yield this.scheduleCronTask(new CronTask(wrapped, trigger));
+                }
+                yield this.scheduleCronTask(new CronTask(wrapped, def.cronExpression()));
+            }
+            case "FIXED_DELAY" -> {
+                limitsChecker.assertInterval(def.taskName(), def.interval());
+                yield this.scheduleFixedDelayTask(new FixedDelayTask(
+                        wrapped, def.interval(), def.initialDelay()));
+            }
+            case "FIXED_RATE" -> {
+                limitsChecker.assertInterval(def.taskName(), def.interval());
+                yield this.scheduleFixedRateTask(new FixedRateTask(
+                        wrapped, def.interval(), def.initialDelay()));
+            }
+            default -> throw new IllegalArgumentException("Unknown task type: " + def.taskType());
+        };
     }
 
     /**
@@ -316,6 +354,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_DELAY",
@@ -356,6 +395,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_RATE",
@@ -422,6 +462,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
         Assert.notNull(retryPolicy, "retryPolicy must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_DELAY",
@@ -455,6 +496,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
         Assert.notNull(retryPolicy, "retryPolicy must not be null");
+        validateIntervalLimit(taskName, interval);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "FIXED_RATE",
@@ -517,6 +559,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         final boolean[] existed = {false};
         taskMap.compute(taskName, (key, existing) -> {
@@ -545,6 +588,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         validateTaskParams(taskName, runnable);
         Assert.notNull(interval, "interval must not be null");
         Assert.notNull(initialDelay, "initialDelay must not be null");
+        validateIntervalLimit(taskName, interval);
 
         final boolean[] existed = {false};
         taskMap.compute(taskName, (key, existing) -> {
@@ -577,6 +621,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     public void schedule(String taskName, Duration delay, Runnable runnable) {
         validateTaskParams(taskName, runnable);
         Assert.notNull(delay, "delay must not be null");
+        validateIntervalLimit(taskName, delay);
 
         // Reserve the name first with a placeholder to prevent execution before registration
         ScheduledTaskEntry placeholder = new ScheduledTaskEntry(() -> {}, "ONE_SHOT",
@@ -632,6 +677,21 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      */
     public void resume(String taskName) {
         Assert.hasText(taskName, "taskName must not be empty");
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null) {
+            log.warn("Task [{}] not found, resume skipped", taskName);
+            return;
+        }
+        if (limitsChecker.isExpired(taskName, entry.createdAt())) {
+            // Atomic check-and-remove: only cancel if this entry is still the one in the map.
+            // A concurrent replaceXxxTask could have swapped it for a fresh entry; preserve that.
+            if (cancelIfCurrent(taskName, entry)) {
+                log.info("Task [{}] exceeded max lifetime during pause, cancelled instead of resumed", taskName);
+            } else {
+                log.debug("Task [{}] entry was replaced before resume could cancel; fresh entry preserved", taskName);
+            }
+            return;
+        }
         if (pausedTasks.remove(taskName)) {
             log.info("Resumed task [{}]", taskName);
         } else {
@@ -661,6 +721,22 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         } else {
             log.warn("Task [{}] not found, cancel skipped", taskName);
         }
+    }
+
+    /**
+     * Atomic check-and-remove: cancels the task only if the entry currently in the map
+     * is still the supplied {@code expectedEntry}. Returns true if the task was cancelled.
+     * Used by {@link #resume(String)} so a concurrent {@code replaceXxxTask} swapping
+     * in a fresh entry is not accidentally cancelled by stale cancellation logic.
+     */
+    public boolean cancelIfCurrent(String taskName, ScheduledTaskEntry expectedEntry) {
+        if (taskMap.remove(taskName, expectedEntry)) {
+            expectedEntry.cancelAction().run();
+            pausedTasks.remove(taskName);
+            log.info("Cancelled task [{}]", taskName);
+            return true;
+        }
+        return false;
     }
 
     // ─── Query API ───────────────────────────────────────────────────
@@ -759,20 +835,41 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     }
 
     /**
+     * Validates the task interval against the configured minimum trigger interval.
+     * No-op when limits are disabled or no min-interval is configured.
+     */
+    private void validateIntervalLimit(String taskName, Duration interval) {
+        limitsChecker.assertInterval(taskName, interval);
+    }
+
+    /**
      * Base instrumentation: adds listener lifecycle, metrics recording, execution history,
      * and distributed lock checking for cluster-aware scheduling.
      * Checks if task is paused before executing.
      */
     private Runnable instrument(String taskName, Runnable delegate) {
         return () -> {
-            // Check if task is paused
+            // 1. Lazy lifetime check
+            ScheduledTaskEntry entry = taskMap.get(taskName);
+            if (entry != null && limitsChecker.isExpired(taskName, entry.createdAt())) {
+                // Atomic check-and-remove: only cancel if our entry reference is still the
+                // one in the map. ConcurrentHashMap.remove(K, V) returns false if the
+                // current value differs (e.g., compute() replaced via replaceXxxTask).
+                if (taskMap.remove(taskName, entry)) {
+                    entry.cancelAction().run();
+                    pausedTasks.remove(taskName);
+                    log.info("Cancelled task [{}]", taskName);
+                }
+                return;
+            }
+
+            // 2. Check if task is paused
             if (pausedTasks.contains(taskName)) {
                 log.debug("Task [{}] is paused, skipping execution", taskName);
                 return;
             }
 
             // Check distributed lock for cluster-aware scheduling
-            ScheduledTaskEntry entry = taskMap.get(taskName);
             Duration lockDuration = resolveLockDuration(entry);
             if (!distributedLock.tryLock(taskName, lockDuration)) {
                 log.debug("Task [{}] could not acquire distributed lock, skipping execution", taskName);
@@ -968,7 +1065,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
 
     // ─── Entry Record ────────────────────────────────────────────────
 
-    record ScheduledTaskEntry(
+    public record ScheduledTaskEntry(
             Runnable cancelAction,
             String taskType,
             String schedule,

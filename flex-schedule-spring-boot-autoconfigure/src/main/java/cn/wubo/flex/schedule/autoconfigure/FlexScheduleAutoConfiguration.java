@@ -10,6 +10,7 @@ import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
+import cn.wubo.flex.schedule.core.TaskLimits;
 import cn.wubo.flex.schedule.metrics.MicrometerMetricsRecorder;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
@@ -50,9 +51,17 @@ public class FlexScheduleAutoConfiguration {
     @Bean(name = "flexScheduledTaskRegistrar")
     public FlexScheduledTaskRegistrar flexScheduledTaskRegistrar(
             @Qualifier("flexScheduleThreadPoolTaskScheduler") ThreadPoolTaskScheduler threadPoolTaskScheduler,
-            FlexScheduleProperties properties) {
+            FlexScheduleProperties properties,
+            TaskLimits taskLimits) {
         return new FlexScheduledTaskRegistrar(
-                threadPoolTaskScheduler, properties.getAwaitTerminationSeconds());
+                threadPoolTaskScheduler, properties.getAwaitTerminationSeconds(), taskLimits);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(TaskLimits.class)
+    public TaskLimits taskLimits(FlexScheduleProperties properties) {
+        FlexScheduleProperties.Limits l = properties.getLimits();
+        return new TaskLimits(l.getMinInterval(), l.getMaxLifetime(), l.getMode());
     }
 
     @Bean(name = "flexScheduledTaskService")

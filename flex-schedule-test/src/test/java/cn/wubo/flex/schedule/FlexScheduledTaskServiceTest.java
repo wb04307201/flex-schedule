@@ -15,6 +15,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -187,5 +188,49 @@ class FlexScheduledTaskServiceTest {
         TaskExecutionListener listener = new TaskExecutionListener() {};
         service.addListener(listener);
         assertDoesNotThrow(() -> service.removeListener(listener));
+    }
+
+    // ─── getTaskStatistics / getAllTaskStatistics ────────────────────
+
+    @Test
+    void getTaskStatistics_noRecords_returnsEmpty() {
+        service.addFixedDelayTask("nohistory", 10, 0, () -> {});
+
+        Optional<cn.wubo.flex.schedule.core.TaskStatistics> stats =
+            service.getTaskStatistics("nohistory");
+
+        assertTrue(stats.isEmpty());
+    }
+
+    @Test
+    void getTaskStatistics_withRecords_returnsPopulated() throws InterruptedException {
+        // Configure a real InMemoryExecutionHistory so we have records to aggregate.
+        registrar.setExecutionHistory(new cn.wubo.flex.schedule.core.InMemoryExecutionHistory(50));
+
+        AtomicInteger fires = new AtomicInteger();
+        service.addFixedDelayTask("withhistory", Duration.ofMillis(30), Duration.ZERO, fires::incrementAndGet);
+
+        // Wait until at least one execution has happened
+        long deadline = System.currentTimeMillis() + 2000;
+        while (fires.get() == 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+
+        Optional<cn.wubo.flex.schedule.core.TaskStatistics> stats =
+            service.getTaskStatistics("withhistory");
+        assertTrue(stats.isPresent());
+        assertTrue(stats.get().totalExecutions() >= 1);
+    }
+
+    @Test
+    void getAllTaskStatistics_returnsOneEntryPerTask() throws InterruptedException {
+        service.addFixedDelayTask("a", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+        service.addFixedDelayTask("b", Duration.ofMinutes(15), Duration.ZERO, () -> {});
+
+        List<cn.wubo.flex.schedule.core.TaskStatistics> all = service.getAllTaskStatistics();
+
+        assertEquals(2, all.size());
+        assertTrue(all.stream().anyMatch(s -> s.taskName().equals("a")));
+        assertTrue(all.stream().anyMatch(s -> s.taskName().equals("b")));
     }
 }

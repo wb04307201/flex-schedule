@@ -43,14 +43,14 @@
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-spring-boot-starter</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.0'
+implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.1'
 ```
 
 ## 快速开始
@@ -283,6 +283,20 @@ taskService.setDistributedLock(myDistributedLock);
 
 锁在每次执行前获取，执行后释放（即使失败也会释放）。如果另一个节点持有锁，则跳过执行。
 
+#### 开箱即用的 Redis 实现
+
+`flex-schedule-redis` 模块自带 `RedisDistributedLock`，基于 Redis SETNX 实现，
+默认安全（每个实例的 UUID 所有权、TTL 过期）。引入依赖后即可自动装配：
+
+```xml
+<dependency>
+    <groupId>io.github.wb04307201</groupId>
+    <artifactId>flex-schedule-redis</artifactId>
+</dependency>
+```
+
+详情和手动覆盖示例见 [flex-schedule-redis/README.md](flex-schedule-redis/README.md)。
+
 ### Micrometer 指标
 
 当 `spring-boot-starter-actuator` 在 classpath 时自动启用：
@@ -294,6 +308,39 @@ taskService.setDistributedLock(myDistributedLock);
 | `flex.schedule.active.tasks` | Gauge | — |
 
 可对接 Prometheus、Grafana 等 Micrometer 兼容系统。Micrometer 不在 classpath 时零开销。
+
+### 任务上下限保护
+
+通过 `flex.schedule.limits` 全局约束所有任务的触发频率与生命周期，防止线程池被打满或临时任务长期占用资源。
+
+```yaml
+flex:
+  schedule:
+    limits:
+      min-interval: PT10M      # 最短触发间隔；空 = 无下限
+      max-lifetime: P7D        # 任务最长生命周期；空 = 无上限
+      mode: strict             # strict | warn | off；默认 strict
+```
+
+| Mode | 违规时行为 |
+|------|-----------|
+| `strict` | 抛 `TaskLimitExceededException`（注册时）；超期静默 cancel + 日志 |
+| `warn`   | 记录 WARN 日志后放行；超期同样 cancel（不 cancel 无意义） |
+| `off`    | 完全跳过所有检查 |
+
+**作用范围**：
+
+| 限制 | 适用任务类型 |
+|------|------------|
+| `min-interval` | `FIXED_DELAY` / `FIXED_RATE` / `ONE_SHOT`（CRON 豁免） |
+| `max-lifetime` | `FIXED_DELAY` / `FIXED_RATE` / `CRON`（ONE_SHOT 豁免，因其只执行一次） |
+
+**关键行为**：
+
+- **懒过期检查**：任务每次触发时检查 `now - createdAt ≥ max-lifetime`，命中则本次 skip + cancel 后续触发
+- **暂停中到期**：任务在暂停期间到期不会自动取消；下次 `resume()` 时会检测到并取消
+- **`replaceXxxTask` 重置 `createdAt`**：替换任务后生命周期计时归零
+- **持久化保留 `createdAt`**：任务跨重启后累计寿命（重启前 3 天 + 重启后 4 天 ≈ 到期）
 
 ### Actuator 端点
 

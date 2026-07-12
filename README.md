@@ -43,14 +43,14 @@
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-spring-boot-starter</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.0'
+implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.1'
 ```
 
 ## Quick Start
@@ -283,6 +283,22 @@ taskService.setDistributedLock(myDistributedLock);
 
 The lock is acquired before each execution and released after (even on failure). If another node holds the lock, execution is skipped.
 
+#### Ready-made Redis implementation
+
+The `flex-schedule-redis` module ships with `RedisDistributedLock`, a Redis SETNX-based
+implementation that is safe by default (per-instance UUID ownership, TTL expiry).
+Add the dependency and the lock is auto-wired:
+
+```xml
+<dependency>
+    <groupId>io.github.wb04307201</groupId>
+    <artifactId>flex-schedule-redis</artifactId>
+</dependency>
+```
+
+See [flex-schedule-redis/README.md](flex-schedule-redis/README.md) for details and
+manual override examples.
+
 ### Micrometer Metrics
 
 Automatically active when `spring-boot-starter-actuator` is on the classpath:
@@ -294,6 +310,39 @@ Automatically active when `spring-boot-starter-actuator` is on the classpath:
 | `flex.schedule.active.tasks` | Gauge | — |
 
 Integrates with Prometheus, Grafana, and any Micrometer-compatible system. Zero overhead when Micrometer is absent.
+
+### Task Scheduling Limits
+
+Constrain trigger frequency and lifetime globally via `flex.schedule.limits`, to prevent thread pool exhaustion or stale temporary tasks.
+
+```yaml
+flex:
+  schedule:
+    limits:
+      min-interval: PT10M      # Minimum trigger interval; null = no limit
+      max-lifetime: P7D        # Maximum task lifetime; null = no limit
+      mode: strict             # strict | warn | off; default strict
+```
+
+| Mode | On violation |
+|------|-------------|
+| `strict` | Throws `TaskLimitExceededException` on registration; expired tasks are silently cancelled + logged |
+| `warn`   | Logs WARN and allows; expired tasks are cancelled (cannot be allowed to live forever) |
+| `off`    | Skips all checks |
+
+**Scope**:
+
+| Limit | Applies to |
+|-------|-----------|
+| `min-interval` | `FIXED_DELAY` / `FIXED_RATE` / `ONE_SHOT` (cron exempt) |
+| `max-lifetime` | `FIXED_DELAY` / `FIXED_RATE` / `CRON` (one-shot exempt — runs once) |
+
+**Key behaviors**:
+
+- **Lazy expiry check**: every fire compares `now - createdAt` against `max-lifetime`; if exceeded, current fire is skipped and future fires are cancelled
+- **Paused task expiry**: tasks paused past their lifetime are not auto-cancelled; next `resume()` detects and cancels
+- **`replaceXxxTask` resets `createdAt`**: lifetime clock restarts
+- **Persistence preserves `createdAt`**: cumulative lifetime across restart (3d before + 4d after ≈ expired)
 
 ### Actuator Endpoint
 

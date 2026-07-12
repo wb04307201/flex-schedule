@@ -26,5 +26,12 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
             <optional>true</optional>
         </dependency>
+
+        <!-- Test-only: real Redis integration tests. Skipped automatically if Redis is unreachable. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

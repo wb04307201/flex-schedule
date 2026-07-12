@@ -92,4 +92,53 @@ class RetryPolicyTest {
         RetryPolicy policy = RetryPolicy.exponential(3, Duration.ofSeconds(10));
         assertEquals(Duration.ofSeconds(10), policy.computeDelay(1));
     }
+
+    // ─── maxDelay cap + overflow guard ──────────────────────────────
+
+    @Test
+    void computeDelay_exponentialWithMaxDelay_capsAtMax() {
+        RetryPolicy policy = RetryPolicy.exponential(10, Duration.ofSeconds(1), Duration.ofSeconds(30));
+        // Attempt 1: 1s, 2: 2s, 3: 4s, 4: 8s, 5: 16s, 6: 32s → cap to 30s
+        assertEquals(Duration.ofSeconds(1), policy.computeDelay(1));
+        assertEquals(Duration.ofSeconds(16), policy.computeDelay(5));
+        assertEquals(Duration.ofSeconds(30), policy.computeDelay(6));
+        assertEquals(Duration.ofSeconds(30), policy.computeDelay(7));
+    }
+
+    @Test
+    void computeDelay_exponentialAttemptOver30_returnsMaxDelay() {
+        RetryPolicy policy = RetryPolicy.exponential(100, Duration.ofSeconds(1), Duration.ofMinutes(5));
+        // attempt > 30 should short-circuit and return maxDelay to prevent overflow
+        assertEquals(Duration.ofMinutes(5), policy.computeDelay(31));
+        assertEquals(Duration.ofMinutes(5), policy.computeDelay(100));
+    }
+
+    @Test
+    void computeDelay_exponentialWithoutMaxDelay_attemptOver30_returnsSentinel() {
+        // Without maxDelay, attempt>30 returns Duration.ofDays(365) as overflow sentinel.
+        RetryPolicy policy = new RetryPolicy(100, Duration.ofSeconds(1), Backoff.EXPONENTIAL, null);
+        assertEquals(Duration.ofDays(365), policy.computeDelay(31));
+    }
+
+    @Test
+    void exponential_withCustomMaxDelay_factory() {
+        RetryPolicy policy = RetryPolicy.exponential(5, Duration.ofSeconds(1), Duration.ofMinutes(10));
+        assertEquals(Duration.ofMinutes(10), policy.maxDelay());
+        assertEquals(Duration.ofSeconds(1), policy.computeDelay(1));
+    }
+
+    @Test
+    void fixed_withMaxDelay_factory() {
+        RetryPolicy policy = RetryPolicy.fixed(3, Duration.ofSeconds(5), Duration.ofMinutes(1));
+        assertEquals(Duration.ofMinutes(1), policy.maxDelay());
+        assertEquals(Duration.ofSeconds(5), policy.computeDelay(1)); // cap not applied (under cap)
+    }
+
+    @Test
+    void constructor_maxDelayNegativeOrZero_shouldThrow() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new RetryPolicy(3, Duration.ofSeconds(1), Backoff.FIXED, Duration.ofMillis(-1)));
+        assertThrows(IllegalArgumentException.class, () ->
+                new RetryPolicy(3, Duration.ofSeconds(1), Backoff.FIXED, Duration.ZERO));
+    }
 }

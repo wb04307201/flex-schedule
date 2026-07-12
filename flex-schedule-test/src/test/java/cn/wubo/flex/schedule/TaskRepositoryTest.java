@@ -76,14 +76,17 @@ class TaskRepositoryTest {
     @Test
     void taskDefinition_builder_shouldSetAllFields() {
         Instant now = Instant.now();
+        Instant updated = now.plusSeconds(60);
         TaskDefinition def = TaskDefinition.builder("myTask", "CRON")
                 .cronExpression("0 * * * * *")
                 .beanName("myBean")
                 .methodName("myMethod")
+                .methodParams(java.util.List.of("p1", 42))
                 .retryPolicy(RetryPolicy.fixed(3, Duration.ofSeconds(1)))
                 .timeout(Duration.ofSeconds(30))
                 .paused(true)
                 .createdAt(now)
+                .updatedAt(updated)
                 .build();
 
         assertEquals("myTask", def.taskName());
@@ -91,10 +94,12 @@ class TaskRepositoryTest {
         assertEquals("0 * * * * *", def.cronExpression());
         assertEquals("myBean", def.beanName());
         assertEquals("myMethod", def.methodName());
+        assertEquals(java.util.List.of("p1", 42), def.methodParams());
         assertNotNull(def.retryPolicy());
         assertEquals(Duration.ofSeconds(30), def.timeout());
         assertTrue(def.paused());
         assertEquals(now, def.createdAt());
+        assertEquals(updated, def.updatedAt());
     }
 
     @Test
