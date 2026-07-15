@@ -8,14 +8,17 @@ import cn.wubo.flex.schedule.core.DefaultFlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.DistributedLock;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
+import cn.wubo.flex.schedule.core.JdbcTaskRepository;
 import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskLimits;
+import cn.wubo.flex.schedule.core.TaskRepository;
 import cn.wubo.flex.schedule.metrics.MicrometerMetricsRecorder;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -52,9 +55,18 @@ public class FlexScheduleAutoConfiguration {
     public FlexScheduledTaskRegistrar flexScheduledTaskRegistrar(
             @Qualifier("flexScheduleThreadPoolTaskScheduler") ThreadPoolTaskScheduler threadPoolTaskScheduler,
             FlexScheduleProperties properties,
-            TaskLimits taskLimits) {
-        return new FlexScheduledTaskRegistrar(
+            TaskLimits taskLimits,
+            ObjectProvider<TaskRepository> taskRepositoryProvider) {
+        FlexScheduledTaskRegistrar registrar = new FlexScheduledTaskRegistrar(
                 threadPoolTaskScheduler, properties.getAwaitTerminationSeconds(), taskLimits);
+        TaskRepository repo = taskRepositoryProvider.getIfAvailable();
+        if (repo != null) {
+            registrar.setTaskRepository(repo);
+            log.info("Flex schedule wired with custom TaskRepository: {}", repo.getClass().getSimpleName());
+        } else {
+            log.info("Flex schedule using default in-memory TaskRepository");
+        }
+        return registrar;
     }
 
     @Bean
@@ -97,6 +109,25 @@ public class FlexScheduleAutoConfiguration {
                 FlexScheduledTaskService taskService,
                 EndpointAccessControl accessControl) {
             return new FlexScheduleEndpoint(taskService, accessControl);
+        }
+    }
+
+    /**
+     * JDBC-backed TaskRepository configuration. Activated when an H2 datasource is
+     * available on the classpath AND a DataSource bean exists. Projects not using
+     * H2 should provide their own TaskRepository bean (e.g. Redis, JDBC URL-based).
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "org.h2.Driver")
+    @ConditionalOnBean(javax.sql.DataSource.class)
+    @ConditionalOnMissingBean(TaskRepository.class)
+    public static class JdbcTaskRepositoryConfiguration {
+
+        @Bean
+        public JdbcTaskRepository flexScheduleJdbcTaskRepository(javax.sql.DataSource dataSource) {
+            JdbcTaskRepository repo = new JdbcTaskRepository(dataSource);
+            repo.ensureSchema();
+            return repo;
         }
     }
 
