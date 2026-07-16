@@ -117,6 +117,7 @@ flex:
 | `pause(name)` | Pause a task (skip execution until resumed) |
 | `resume(name)` | Resume a paused task |
 | `isPaused(name)` | Check if a task is paused |
+| `setCreatedAt(name, instant)` | Override a task's logical `createdAt`. Useful for persistence-aware consumers that rehydrate tasks at startup with the original creation instant so the `max-lifetime` ceiling keeps working across restarts. No-op if the task isn't registered or `instant` is null. |
 | `exists(name)` | Check if a task exists |
 | `listTasks()` | List all tasks (`List<TaskInfo>`) |
 | `getTaskDetail(name)` | Get task detail (`Optional<TaskDetail>`) |
@@ -217,7 +218,10 @@ own `TaskRepository` bean.
    Redis, or a similar store.
 2. On application startup, call `FlexScheduledTaskRegistrar.restoreTasks()` — it reads
    `TaskRepository.findAll()` and rehydrates each row honoring the persisted
-   `createdAt`.
+   `createdAt`. For non-bean-method triggers, instead use
+   `FlexScheduledTaskService.setCreatedAt(name, instant)` (or
+   `TaskBuilder.createdAt(Instant)` before `register(...)`) to stamp the
+   original creation time onto the in-memory entry.
 3. For non-bean-method triggers (lambda closures, prompt-driven work, etc.), skip
    `restoreTasks()` and instead call `TaskBuilder.createdAt(Instant)` before
    `register(...)` to override the default `Instant.now()` stamp.
@@ -463,6 +467,13 @@ Yes. Use `replace*()` methods to atomically swap, or `cancel()` then `add()`.
 
 **Cancel a non-existent task?**
 Logs a WARN, no exception thrown.
+
+**How do I make tasks survive restarts?**
+flex-schedule ships no persistence default — see [Persistence](#persistence). The
+shape depends on your trigger type:
+- Bean-method triggers: persist `TaskDefinition` (`beanName`/`methodName`/`createdAt`) and call `FlexScheduledTaskRegistrar.restoreTasks()` on startup.
+- Lambda / prompt-driven triggers: persist whatever you need, then re-register with `service.task(name)...createdAt(storedInstant).register(runnable)` so the `max-lifetime` clock survives the restart.
+The new `setCreatedAt(name, instant)` API on `FlexScheduledTaskService` lets you override the default `Instant.now()` stamp anytime after `register(...)`.
 
 **What happens on shutdown?**
 All tasks cancelled → `shutdown()` → waits up to `await-termination-seconds` (default 30s) → `shutdownNow()` fallback.

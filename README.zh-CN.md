@@ -117,6 +117,7 @@ flex:
 | `pause(name)` | 暂停任务（跳过执行直到恢复） |
 | `resume(name)` | 恢复暂停的任务 |
 | `isPaused(name)` | 检查任务是否暂停 |
+| `setCreatedAt(name, instant)` | 覆盖任务的逻辑 `createdAt`。供持久化感知的消费者在启动恢复时使用 — 让 `max-lifetime` 跨重启仍以原时刻计时。任务不存在或 `instant` 为 `null` 时为静默 no-op。 |
 | `exists(name)` | 判断任务是否存在 |
 | `listTasks()` | 列出所有任务（`List<TaskInfo>`） |
 | `getTaskDetail(name)` | 获取任务详情（`Optional<TaskDetail>`） |
@@ -213,7 +214,7 @@ flex-schedule **不提供持久化默认实现** — 调度核心是纯内存的
 **消费方通常的做法**：
 
 1. 用 JDBC、Redis 或同类存储把 `TaskDefinition`（含 `beanName`/`methodName`/`createdAt`）持久化。
-2. 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()`，它会读取 `TaskRepository.findAll()` 并按 `createdAt` 还原。
+2. 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()`，它会读取 `TaskRepository.findAll()` 并按 `createdAt` 还原。非 bean-method 形式的触发器（如 lambda、prompt-driven），改用 `FlexScheduledTaskService.setCreatedAt(name, instant)`（或在 `register(...)` 之前用 `TaskBuilder.createdAt(Instant)`）把原始创建时间写回到内存条目上。
 3. 如果触发器不是 bean-method 反射形式（如 lambda、prompt-driven），可在 `TaskBuilder.register(...)` 之前调用 `TaskBuilder.createdAt(Instant)` 直接覆盖默认值（不需要走 `restoreTasks()`）。
 
 参考消费方 `spring-ai-loom-agent` 的 `ScheduleRestoreListener`，演示了 prompt-driven 调度如何通过 `TaskBuilder.createdAt(...)` + `ApplicationReadyEvent` 接管整个恢复生命周期。
@@ -453,6 +454,12 @@ flex:
 
 **关闭时如何处理？**
 取消所有任务 → `shutdown()` → 等待 `await-termination-seconds`（默认 30s）→ 超时则 `shutdownNow()`。
+
+**任务如何跨重启保留？**
+flex-schedule 不附带持久化默认 — 见 [持久化](#持久化)。按触发器形状有两种做法：
+- Bean-method 触发器：持久化 `TaskDefinition`（`beanName` / `methodName` / `createdAt`），启动时调 `FlexScheduledTaskRegistrar.restoreTasks()`。
+- Lambda / prompt-driven 触发器：把需要的信息存到自己的表，重启后通过 `service.task(name)...createdAt(storedInstant).register(runnable)` 重新装载，让 `max-lifetime` 跨重启继续按原时刻计时。
+新加的 `setCreatedAt(name, instant)` 接口方法支持在 `register(...)` 之后再覆盖默认的 `Instant.now()`。
 
 **如何禁用？**
 设置 `flex.schedule.enabled=false`。
