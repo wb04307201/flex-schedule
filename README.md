@@ -205,6 +205,32 @@ taskService.isPaused("myTask");  // true
 taskService.resume("myTask");
 ```
 
+### Persistence
+
+flex-schedule ships **no persistence default** — the scheduler core is pure in-memory
+(`InMemoryTaskRepository`). When tasks need to survive restarts, consumers provide their
+own `TaskRepository` bean.
+
+**Consumer-side recipe**:
+
+1. Persist `TaskDefinition` (including `beanName` / `methodName` / `createdAt`) to JDBC,
+   Redis, or a similar store.
+2. On application startup, call `FlexScheduledTaskRegistrar.restoreTasks()` — it reads
+   `TaskRepository.findAll()` and rehydrates each row honoring the persisted
+   `createdAt`.
+3. For non-bean-method triggers (lambda closures, prompt-driven work, etc.), skip
+   `restoreTasks()` and instead call `TaskBuilder.createdAt(Instant)` before
+   `register(...)` to override the default `Instant.now()` stamp.
+
+`spring-ai-loom-agent` (a reference consumer) demonstrates the prompt-driven case:
+see `ScheduleRestoreListener`, which wires `TaskBuilder.createdAt(...)` + an
+`ApplicationReadyEvent` listener to own the entire restore lifecycle.
+
+> Historical note: earlier versions auto-registered a `JdbcTaskRepository` bean (H2).
+> It created a `flex_scheduled_task` table but never wrote any row — effectively dead
+> code that misled advanced users into thinking H2 was the recommended default. It
+> has been removed.
+
 ### Execution Timeout
 
 ```java
@@ -342,7 +368,7 @@ flex:
 - **Lazy expiry check**: every fire compares `now - createdAt` against `max-lifetime`; if exceeded, current fire is skipped and future fires are cancelled
 - **Paused task expiry**: tasks paused past their lifetime are not auto-cancelled; next `resume()` detects and cancels
 - **`replaceXxxTask` resets `createdAt`**: lifetime clock restarts
-- **Persistence preserves `createdAt`**: cumulative lifetime across restart (3d before + 4d after ≈ expired)
+- **`createdAt` persistence is the consumer's responsibility**: flex-schedule no longer ships a JDBC default (see [Persistence](#persistence)). For lifetime to survive a restart, the consumer must persist the original `createdAt` and either (a) provide it via `TaskDefinition.createdAt` to `restoreTasks()` or (b) pass it directly to `TaskBuilder.createdAt(Instant)`.
 
 ### Actuator Endpoint
 

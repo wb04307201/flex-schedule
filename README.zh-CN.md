@@ -205,6 +205,21 @@ taskService.isPaused("myTask");  // true
 taskService.resume("myTask");
 ```
 
+### 持久化
+
+flex-schedule **不提供持久化默认实现** — 调度核心是纯内存的（`InMemoryTaskRepository`）。
+需要任务跨重启存活时，由消费者自行提供 `TaskRepository` bean。
+
+**消费方通常的做法**：
+
+1. 用 JDBC、Redis 或同类存储把 `TaskDefinition`（含 `beanName`/`methodName`/`createdAt`）持久化。
+2. 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()`，它会读取 `TaskRepository.findAll()` 并按 `createdAt` 还原。
+3. 如果触发器不是 bean-method 反射形式（如 lambda、prompt-driven），可在 `TaskBuilder.register(...)` 之前调用 `TaskBuilder.createdAt(Instant)` 直接覆盖默认值（不需要走 `restoreTasks()`）。
+
+参考消费方 `spring-ai-loom-agent` 的 `ScheduleRestoreListener`，演示了 prompt-driven 调度如何通过 `TaskBuilder.createdAt(...)` + `ApplicationReadyEvent` 接管整个恢复生命周期。
+
+> 历史注意：早期版本曾自动装配一个 `JdbcTaskRepository`（H2）。该 bean 会创建 `flex_scheduled_task` 表但从不写入任何行 — 实际是死代码且会让高级用户误以为 H2 是推荐默认。已移除。
+
 ### 执行超时
 
 ```java
@@ -340,7 +355,7 @@ flex:
 - **懒过期检查**：任务每次触发时检查 `now - createdAt ≥ max-lifetime`，命中则本次 skip + cancel 后续触发
 - **暂停中到期**：任务在暂停期间到期不会自动取消；下次 `resume()` 时会检测到并取消
 - **`replaceXxxTask` 重置 `createdAt`**：替换任务后生命周期计时归零
-- **持久化保留 `createdAt`**：任务跨重启后累计寿命（重启前 3 天 + 重启后 4 天 ≈ 到期）
+- **`createdAt` 持久化是消费者的责任**：flex-schedule 自身不再附带 JDBC 默认实现（参见 [持久化](#持久化) 章节）。如果希望任务跨重启保留 `createdAt`，消费者必须在持久化层记录原始 `createdAt`，并在恢复时通过 `TaskBuilder.createdAt(Instant)` 或 `FlexScheduledTaskRegistrar.restoreTasks()` 的 `TaskDefinition.createdAt` 字段回填。
 
 ### Actuator 端点
 
