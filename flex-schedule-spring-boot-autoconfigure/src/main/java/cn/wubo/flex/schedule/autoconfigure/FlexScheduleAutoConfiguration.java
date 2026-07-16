@@ -6,8 +6,10 @@ import cn.wubo.flex.schedule.autoconfigure.endpoint.EndpointAccessControl;
 import cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties;
 import cn.wubo.flex.schedule.core.DefaultFlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.DistributedLock;
+import cn.wubo.flex.schedule.core.ExecutionHistory;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
+import cn.wubo.flex.schedule.core.InMemoryExecutionHistory;
 import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskLimits;
@@ -55,7 +57,8 @@ public class FlexScheduleAutoConfiguration {
             @Qualifier("flexScheduleThreadPoolTaskScheduler") ThreadPoolTaskScheduler threadPoolTaskScheduler,
             FlexScheduleProperties properties,
             TaskLimits taskLimits,
-            ObjectProvider<TaskRepository> taskRepositoryProvider) {
+            ObjectProvider<TaskRepository> taskRepositoryProvider,
+            ObjectProvider<ExecutionHistory> executionHistoryProvider) {
         FlexScheduledTaskRegistrar registrar = new FlexScheduledTaskRegistrar(
                 threadPoolTaskScheduler, properties.getAwaitTerminationSeconds(), taskLimits);
         TaskRepository repo = taskRepositoryProvider.getIfAvailable();
@@ -65,7 +68,31 @@ public class FlexScheduleAutoConfiguration {
         } else {
             log.info("Flex schedule using default in-memory TaskRepository");
         }
+        ExecutionHistory history = executionHistoryProvider.getIfAvailable();
+        if (history != null) {
+            registrar.setExecutionHistory(history);
+            log.info("Flex schedule wired with ExecutionHistory: {}", history.getClass().getSimpleName());
+        } else {
+            log.info("Flex schedule using default NOOP ExecutionHistory (history is NOT recorded)");
+        }
         return registrar;
+    }
+
+    /**
+     * Default {@link ExecutionHistory} bean — keeps a per-task bounded ring of
+     * recent execution records so {@code flexService.getExecutionHistory(name)}
+     * returns real data. Without this bean, the registrar falls back to
+     * {@link ExecutionHistory#NOOP} (silently drops records).
+     *
+     * <p>{@code @ConditionalOnMissingBean} so consumers can substitute their
+     * own (Redis-backed, JDBC-backed, etc.) by registering a different
+     * {@link ExecutionHistory} bean.</p>
+     */
+    @Bean
+    @ConditionalOnMissingBean(ExecutionHistory.class)
+    public ExecutionHistory flexScheduleExecutionHistory() {
+        log.info("Flex schedule installing default InMemoryExecutionHistory (100 records/task)");
+        return new InMemoryExecutionHistory();
     }
 
     @Bean
