@@ -136,6 +136,7 @@ public class FlexScheduleAutoConfiguration {
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(MeterRegistry.class)
+    @ConditionalOnBean(MeterRegistry.class)
     static class MetricsConfiguration {
 
         @Bean
