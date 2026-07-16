@@ -739,6 +739,39 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         return false;
     }
 
+    /**
+     * Overrides the {@code createdAt} of an already-registered task. Used by
+     * persistence-aware consumers (typically a startup restore listener) to
+     * preserve a task's logical age across application restarts so the
+     * {@code max-lifetime} ceiling still applies.
+     * <p>
+     * No-op if the task is not registered or {@code createdAt} is {@code null}.
+     * Does not reschedule or otherwise modify the trigger; only the metadata
+     * stamped on the {@link ScheduledTaskEntry} changes.
+     * </p>
+     *
+     * @param taskName  the task name
+     * @param createdAt the instant the task should be considered as created
+     */
+    public void setCreatedAt(String taskName, Instant createdAt) {
+        if (createdAt == null) {
+            return;
+        }
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null) {
+            log.warn("Cannot setCreatedAt for task [{}]: not registered", taskName);
+            return;
+        }
+        taskMap.put(taskName, new ScheduledTaskEntry(
+                entry.cancelAction(),
+                entry.taskType(),
+                entry.schedule(),
+                entry.retryPolicy(),
+                entry.oneShot(),
+                createdAt));
+        log.info("Updated createdAt of task [{}] to {}", taskName, createdAt);
+    }
+
     // ─── Query API ───────────────────────────────────────────────────
 
     public boolean exists(String taskName) {

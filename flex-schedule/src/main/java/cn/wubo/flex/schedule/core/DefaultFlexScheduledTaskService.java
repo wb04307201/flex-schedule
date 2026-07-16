@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule.core;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
@@ -140,6 +141,11 @@ public class DefaultFlexScheduledTaskService implements FlexScheduledTaskService
     @Override
     public boolean isPaused(String taskName) {
         return flexScheduledTaskRegistrar.isPaused(taskName);
+    }
+
+    @Override
+    public void setCreatedAt(String taskName, Instant createdAt) {
+        flexScheduledTaskRegistrar.setCreatedAt(taskName, createdAt);
     }
 
     // ─── Query ────────────────────────────────────────────────────────
