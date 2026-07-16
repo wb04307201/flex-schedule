@@ -8,7 +8,6 @@ import cn.wubo.flex.schedule.core.DefaultFlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.DistributedLock;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
-import cn.wubo.flex.schedule.core.JdbcTaskRepository;
 import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskLimits;
@@ -109,25 +108,6 @@ public class FlexScheduleAutoConfiguration {
                 FlexScheduledTaskService taskService,
                 EndpointAccessControl accessControl) {
             return new FlexScheduleEndpoint(taskService, accessControl);
-        }
-    }
-
-    /**
-     * JDBC-backed TaskRepository configuration. Activated when an H2 datasource is
-     * available on the classpath AND a DataSource bean exists. Projects not using
-     * H2 should provide their own TaskRepository bean (e.g. Redis, JDBC URL-based).
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(name = "org.h2.Driver")
-    @ConditionalOnBean(javax.sql.DataSource.class)
-    @ConditionalOnMissingBean(TaskRepository.class)
-    public static class JdbcTaskRepositoryConfiguration {
-
-        @Bean
-        public JdbcTaskRepository flexScheduleJdbcTaskRepository(javax.sql.DataSource dataSource) {
-            JdbcTaskRepository repo = new JdbcTaskRepository(dataSource);
-            repo.ensureSchema();
-            return repo;
         }
     }
 
