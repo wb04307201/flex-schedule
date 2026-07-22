@@ -107,8 +107,10 @@ flex:
 
 | Method | Description |
 |--------|-------------|
+| `task(name)` | Create a fluent `TaskBuilder` |
 | `add(name, cron, runnable [, retryPolicy])` | Register a Cron task |
 | `add(name, cron, ZoneId, runnable)` | Register a Cron task with timezone |
+| `add(name, cron, ZoneId, retryPolicy, runnable)` | Register a Cron task with timezone and retry policy |
 | `add(name, cron, timeout, runnable)` | Register a Cron task with execution timeout |
 | `addFixedDelayTask(name, interval, initialDelay, runnable [, retryPolicy])` | Register a fixed-delay task |
 | `addFixedRateTask(name, interval, initialDelay, runnable [, retryPolicy])` | Register a fixed-rate task |
@@ -123,8 +125,12 @@ flex:
 | `getTaskDetail(name)` | Get task detail (`Optional<TaskDetail>`) |
 | `replaceCronTask / replaceFixedDelayTask / replaceFixedRateTask(...)` | Replace or add a task |
 | `addListener / removeListener(listener)` | Manage lifecycle listeners |
+| `setExecutionHistory(history)` | Replace the execution-history backend |
 | `getExecutionHistory(name, limit)` | Get execution history for a task |
 | `getAllExecutionHistory(limit)` | Get all execution history |
+| `clearExecutionHistory(name)` | Clear one task's history; pass `null` to clear all history |
+| `getTaskStatistics(name)` | Get aggregated execution statistics for one task |
+| `getAllTaskStatistics()` | Get aggregated execution statistics for all tasks |
 | `setDistributedLock(lock)` | Set cluster-aware distributed lock |
 
 - `interval` / `initialDelay` / `delay` accept `long` (seconds) or `Duration` (any precision)
@@ -140,6 +146,18 @@ record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
                   boolean paused) {}
 ```
+
+### Fluent Task Builder
+
+```java
+taskService.task("cleanup")
+    .fixedDelay(Duration.ofMinutes(10))
+    .timeout(Duration.ofSeconds(30))
+    .retry(RetryPolicy.fixed(3, Duration.ofSeconds(2)))
+    .register(this::cleanup);
+```
+
+Choose exactly one scheduling type with `cron`, `fixedDelay`, `fixedRate`, or `oneShot`. Options such as `timezone`, `timeout`, `retry`, and `createdAt` can be composed where applicable.
 
 ## Advanced Usage
 
@@ -270,16 +288,25 @@ If any step fails, the chain stops and the error propagates.
 
 ### Execution History
 
-```java
-// Enable in-memory execution history (100 records per task)
-registrar.setExecutionHistory(new InMemoryExecutionHistory(100));
+When the Spring Boot starter is used, execution history is enabled automatically with an `InMemoryExecutionHistory` that keeps the latest 100 records per task. Define your own `ExecutionHistory` bean to replace the default backend.
 
+For manual registrar or service construction only:
+
+```java
+taskService.setExecutionHistory(new InMemoryExecutionHistory(100));
+```
+
+```java
 // Query history
 List<ExecutionRecord> records = taskService.getExecutionHistory("myTask", 10);
 // Each record contains: taskName, taskType, startTime, duration, success, error
 
 // Get all history across tasks
 List<ExecutionRecord> all = taskService.getAllExecutionHistory(50);
+
+// Aggregate statistics from recorded history
+Optional<TaskStatistics> stats = taskService.getTaskStatistics("myTask");
+List<TaskStatistics> allStats = taskService.getAllTaskStatistics();
 
 // Clear history
 taskService.clearExecutionHistory("myTask");  // specific task
@@ -288,28 +315,9 @@ taskService.clearExecutionHistory(null);       // all tasks
 
 ### Cluster-Aware Scheduling (Distributed Lock)
 
-In multi-instance deployments, use a `DistributedLock` to ensure only one node executes a task:
+In multi-instance deployments, use a `DistributedLock` to ensure only one node executes a task. Register a `DistributedLock` bean or call `taskService.setDistributedLock(lock)` when constructing the scheduler manually.
 
-```java
-// Implement the interface (or use a provided adapter)
-@Bean
-public DistributedLock myDistributedLock(RedisTemplate<String, String> redis) {
-    return new DistributedLock() {
-        @Override
-        public boolean tryLock(String taskName, Duration lockDuration) {
-            return Boolean.TRUE.equals(
-                redis.opsForValue().setIfAbsent("lock:" + taskName, "1", lockDuration));
-        }
-        @Override
-        public void unlock(String taskName) {
-            redis.delete("lock:" + taskName);
-        }
-    };
-}
-
-// Set on the registrar
-taskService.setDistributedLock(myDistributedLock);
-```
+Custom implementations must attach an ownership token to each acquired lock and verify ownership before release. Avoid unconditional key deletion: an expired lock may already have been acquired by another instance. For Redis, prefer the provided implementation below.
 
 The lock is acquired before each execution and released after (even on failure). If another node holds the lock, execution is skipped.
 
@@ -324,6 +332,15 @@ Add the dependency and the lock is auto-wired:
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-redis</artifactId>
 </dependency>
+```
+
+The lock is auto-wired when Spring Data Redis is available. To declare it explicitly:
+
+```java
+@Bean
+public DistributedLock redisDistributedLock(StringRedisTemplate redisTemplate) {
+    return new RedisDistributedLock(redisTemplate);
+}
 ```
 
 See [flex-schedule-redis/README.md](flex-schedule-redis/README.md) for details and
@@ -356,8 +373,8 @@ flex:
 
 | Mode | On violation |
 |------|-------------|
-| `strict` | Throws `TaskLimitExceededException` on registration; expired tasks are silently cancelled + logged |
-| `warn`   | Logs WARN and allows; expired tasks are cancelled (cannot be allowed to live forever) |
+| `strict` | Throws `TaskLimitExceededException` for a registration violation; expired recurring tasks are logged and auto-cancelled |
+| `warn`   | Logs WARN and allows the registration or expired task to continue |
 | `off`    | Skips all checks |
 
 **Scope**:
@@ -369,8 +386,8 @@ flex:
 
 **Key behaviors**:
 
-- **Lazy expiry check**: every fire compares `now - createdAt` against `max-lifetime`; if exceeded, current fire is skipped and future fires are cancelled
-- **Paused task expiry**: tasks paused past their lifetime are not auto-cancelled; next `resume()` detects and cancels
+- **Lazy expiry check**: every fire compares `now - createdAt` against `max-lifetime`; in `strict` mode, an expired task skips the current fire and cancels future fires, while `warn` mode logs and continues
+- **Paused task expiry**: tasks paused past their lifetime are checked on the next `resume()`; `strict` mode cancels them, while `warn` mode logs and resumes them
 - **`replaceXxxTask` resets `createdAt`**: lifetime clock restarts
 - **`createdAt` persistence is the consumer's responsibility**: flex-schedule no longer ships a JDBC default (see [Persistence](#persistence)). For lifetime to survive a restart, the consumer must persist the original `createdAt` and either (a) provide it via `TaskDefinition.createdAt` to `restoreTasks()` or (b) pass it directly to `TaskBuilder.createdAt(Instant)`.
 
@@ -438,9 +455,11 @@ For custom authorization logic, implement `EndpointAccessControl` and register i
 |-----------|------|
 | `TaskAlreadyExistsException` | Adding a task with a duplicate name |
 | `BeanMethodRunnableException` | Reflective bean method invocation fails |
+| `ExecutionTimeoutException` | Task execution exceeds its configured timeout |
+| `TaskLimitExceededException` | Strict scheduling-limit validation fails |
 | `IllegalArgumentException` | Parameter validation (null/empty) |
 
-All extend `FlexScheduleException`.
+`TaskAlreadyExistsException`, `BeanMethodRunnableException`, `ExecutionTimeoutException`, and `TaskLimitExceededException` extend `FlexScheduleException`. Parameter validation uses the standard `IllegalArgumentException`.
 
 ## Modules
 
@@ -449,7 +468,8 @@ All extend `FlexScheduleException`.
 | `flex-schedule/` | `flex-schedule` | Core library |
 | `flex-schedule-spring-boot-autoconfigure/` | `flex-schedule-spring-boot-autoconfigure` | Auto-config, metrics, endpoint |
 | `flex-schedule-spring-boot-starter/` | `flex-schedule-spring-boot-starter` | Starter (dependencies only) |
-| `flex-schedule-test/` | `flex-schedule-test` | Tests (198 cases) |
+| `flex-schedule-redis/` | `flex-schedule-redis` | Redis-backed distributed lock implementation |
+| `flex-schedule-test/` | `flex-schedule-test` | Unit and integration tests |
 
 ## Build
 

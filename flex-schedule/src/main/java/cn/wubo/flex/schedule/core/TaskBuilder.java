@@ -159,7 +159,9 @@ public class TaskBuilder {
                 service.addFixedRateTask(taskName, fixedRate, initialDelay, wrapped);
             }
         } else if (cron != null) {
-            if (timezone != null) {
+            if (timezone != null && retryPolicy != null) {
+                service.add(taskName, cron, timezone, retryPolicy, wrapped);
+            } else if (timezone != null) {
                 service.add(taskName, cron, timezone, wrapped);
             } else if (retryPolicy != null) {
                 service.add(taskName, cron, wrapped, retryPolicy);

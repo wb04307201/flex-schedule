@@ -1,6 +1,5 @@
-package cn.wubo.flex.schedule;
+package cn.wubo.flex.schedule.core;
 
-import cn.wubo.flex.schedule.core.*;
 import cn.wubo.flex.schedule.exception.TaskAlreadyExistsException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,6 +10,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -762,5 +762,196 @@ class FlexScheduledTaskRegistrarTest {
         registrar.cancel("pausedCancel");
         assertFalse(registrar.isPaused("pausedCancel"));
         assertFalse(registrar.exists("pausedCancel"));
+    }
+
+    // ─── Replace Clears Stale Paused Flag ─────────────────────────────
+
+    @Test
+    void replaceCronTask_whenPaused_clearsPausedFlag() {
+        registrar.addCronTask("pausedSub", "0 * * * * *", () -> {});
+        registrar.pause("pausedSub");
+        assertTrue(registrar.isPaused("pausedSub"));
+
+        boolean replaced = registrar.replaceCronTask("pausedSub", "0 0 * * * *", () -> {});
+        assertTrue(replaced);
+        assertTrue(registrar.exists("pausedSub"));
+        assertFalse(registrar.isPaused("pausedSub"),
+                "replaceCronTask must clear a stale pausedTasks flag");
+        TaskDetail detail = registrar.getTaskDetail("pausedSub").orElseThrow();
+        assertFalse(detail.paused());
+    }
+
+    @Test
+    void replaceFixedDelayTask_whenPaused_clearsPausedFlag() {
+        registrar.addFixedDelayTask("pausedDelay", Duration.ofSeconds(10), Duration.ZERO, () -> {});
+        registrar.pause("pausedDelay");
+        assertTrue(registrar.isPaused("pausedDelay"));
+
+        boolean replaced = registrar.replaceFixedDelayTask("pausedDelay",
+                Duration.ofSeconds(20), Duration.ZERO, () -> {});
+        assertTrue(replaced);
+        assertTrue(registrar.exists("pausedDelay"));
+        assertFalse(registrar.isPaused("pausedDelay"),
+                "replaceFixedDelayTask must clear a stale pausedTasks flag");
+    }
+
+    @Test
+    void replaceFixedRateTask_whenPaused_clearsPausedFlag() {
+        registrar.addFixedRateTask("pausedRate", Duration.ofSeconds(10), Duration.ZERO, () -> {});
+        registrar.pause("pausedRate");
+        assertTrue(registrar.isPaused("pausedRate"));
+
+        boolean replaced = registrar.replaceFixedRateTask("pausedRate",
+                Duration.ofSeconds(20), Duration.ZERO, () -> {});
+        assertTrue(replaced);
+        assertTrue(registrar.exists("pausedRate"));
+        assertFalse(registrar.isPaused("pausedRate"),
+                "replaceFixedRateTask must clear a stale pausedTasks flag");
+    }
+
+    @Test
+    void replaceCronTask_withZeroRetries_shouldExecute() throws InterruptedException {
+        // Belt-and-suspenders: the replacement is live (not paused) and actually executes.
+        AtomicInteger executed = new AtomicInteger();
+        CountDownLatch latch = new CountDownLatch(1);
+
+        registrar.addCronTask("liveReplace", "0/1 * * * * ?", () -> {});
+        registrar.pause("liveReplace");
+        registrar.replaceCronTask("liveReplace", "0/1 * * * * ?", () -> {
+            executed.incrementAndGet();
+            latch.countDown();
+        });
+
+        assertFalse(registrar.isPaused("liveReplace"));
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertTrue(executed.get() >= 1);
+    }
+
+    // ─── round-3: pause must survive replace (ordering) ──────────────
+
+    @Test
+    void replaceCronTask_pauseAfterReplace_isRespected() {
+        registrar.addCronTask("orderedCron", "0 * * * * *", () -> {});
+        registrar.replaceCronTask("orderedCron", "0 * * * * *", () -> {});
+        registrar.pause("orderedCron");
+        assertTrue(registrar.isPaused("orderedCron"),
+                "pause issued after replace must be retained");
+    }
+
+    @Test
+    void replaceFixedDelayTask_pauseAfterReplace_isRespected() {
+        registrar.addFixedDelayTask("orderedDelay", Duration.ofSeconds(10), Duration.ZERO, () -> {});
+        registrar.replaceFixedDelayTask("orderedDelay", Duration.ofSeconds(20), Duration.ZERO, () -> {});
+        registrar.pause("orderedDelay");
+        assertTrue(registrar.isPaused("orderedDelay"),
+                "pause issued after replace must be retained");
+    }
+
+    @Test
+    void replaceFixedRateTask_pauseAfterReplace_isRespected() {
+        registrar.addFixedRateTask("orderedRate", Duration.ofSeconds(10), Duration.ZERO, () -> {});
+        registrar.replaceFixedRateTask("orderedRate", Duration.ofSeconds(20), Duration.ZERO, () -> {});
+        registrar.pause("orderedRate");
+        assertTrue(registrar.isPaused("orderedRate"),
+                "pause issued after replace must be retained");
+    }
+
+    // ─── round-3: async-listener executor lifecycle ─────────────────
+
+    @Test
+    void destroy_shutsDownDefaultAsyncListenerExecutor() {
+        ExecutorService defaultExecutor = registrar.getAsyncListenerExecutorForTest();
+        assertNotNull(defaultExecutor, "Default async listener executor must exist");
+        assertFalse(defaultExecutor.isShutdown(), "Default pool must start live");
+
+        registrar.destroy();
+
+        assertTrue(defaultExecutor.isShutdown(),
+                "destroy() must shut down the internally owned default async-listener pool");
+    }
+
+    @Test
+    void destroy_doesNotShutDownCallerSuppliedAsyncListenerExecutor() {
+        ExecutorService real = java.util.concurrent.Executors.newSingleThreadExecutor();
+        RecordingExecutorService spy = new RecordingExecutorService(real);
+        try {
+            registrar.setAsyncListenerExecutor(spy);
+            assertSame(spy, registrar.getAsyncListenerExecutorForTest());
+
+            registrar.destroy();
+
+            assertEquals(0, spy.shutdownCount.get(),
+                    "destroy() must NOT shut down a caller-supplied async-listener executor");
+            assertFalse(real.isShutdown(),
+                    "spy should not have propagated shutdown to the wrapped executor");
+        } finally {
+            real.shutdownNow();
+        }
+    }
+
+    @Test
+    void setAsyncListenerExecutor_null_replacesWithInternalPool() {
+        ExecutorService firstDefault = registrar.getAsyncListenerExecutorForTest();
+        registrar.setAsyncListenerExecutor(null);
+        ExecutorService replacement = registrar.getAsyncListenerExecutorForTest();
+
+        assertNotNull(replacement);
+        assertNotSame(firstDefault, replacement,
+                "null fallback must produce a new internal pool");
+        assertTrue(firstDefault.isShutdown(),
+                "old internal pool must be shut down by setAsyncListenerExecutor(null)");
+
+        registrar.destroy();
+        assertTrue(replacement.isShutdown(),
+                "destroy() must shut down the replacement internal pool");
+    }
+
+    @Test
+    void setAsyncListenerExecutor_replacesInternalWithExternal_shutsDownPreviousOnly() {
+        ExecutorService previousInternal = registrar.getAsyncListenerExecutorForTest();
+        ExecutorService real = java.util.concurrent.Executors.newSingleThreadExecutor();
+        RecordingExecutorService external = new RecordingExecutorService(real);
+        try {
+            registrar.setAsyncListenerExecutor(external);
+
+            assertSame(external, registrar.getAsyncListenerExecutorForTest());
+            assertTrue(previousInternal.isShutdown(),
+                    "previous internal pool must be shut down when replaced");
+
+            registrar.destroy();
+
+            assertEquals(0, external.shutdownCount.get(),
+                    "destroy() must not shut down caller-supplied executor");
+            assertFalse(real.isShutdown(),
+                    "spy should not have propagated shutdown to the wrapped executor");
+        } finally {
+            real.shutdownNow();
+        }
+    }
+
+    /**
+     * Delegates to a real {@link ExecutorService} but counts every shutdown-related
+     * call, so a test can assert the registrar did or did not trigger shutdown on
+     * a caller-supplied executor.
+     */
+    private static class RecordingExecutorService implements ExecutorService {
+        final ExecutorService delegate;
+        final AtomicInteger shutdownCount = new AtomicInteger();
+
+        RecordingExecutorService(ExecutorService delegate) { this.delegate = delegate; }
+
+        @Override public void shutdown() { shutdownCount.incrementAndGet(); }
+        @Override public java.util.List<Runnable> shutdownNow() { shutdownCount.incrementAndGet(); return delegate.shutdownNow(); }
+        @Override public boolean isShutdown() { return delegate.isShutdown(); }
+        @Override public boolean isTerminated() { return delegate.isTerminated(); }
+        @Override public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException { return delegate.awaitTermination(timeout, unit); }
+        @Override public <T> java.util.concurrent.Future<T> submit(java.util.concurrent.Callable<T> task) { return delegate.submit(task); }
+        @Override public <T> java.util.concurrent.Future<T> submit(Runnable task, T result) { return delegate.submit(task, result); }
+        @Override public java.util.concurrent.Future<?> submit(Runnable task) { return delegate.submit(task); }
+        @Override public <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) throws InterruptedException { return delegate.invokeAll(tasks); }
+        @Override public <T> java.util.List<java.util.concurrent.Future<T>> invokeAll(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks, long timeout, TimeUnit unit) throws InterruptedException { return delegate.invokeAll(tasks, timeout, unit); }
+        @Override public <T> T invokeAny(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks) throws InterruptedException, java.util.concurrent.ExecutionException { return delegate.invokeAny(tasks); }
+        @Override public <T> T invokeAny(java.util.Collection<? extends java.util.concurrent.Callable<T>> tasks, long timeout, TimeUnit unit) throws InterruptedException, java.util.concurrent.ExecutionException, java.util.concurrent.TimeoutException { return delegate.invokeAny(tasks, timeout, unit); }
+        @Override public void execute(Runnable command) { delegate.execute(command); }
     }
 }

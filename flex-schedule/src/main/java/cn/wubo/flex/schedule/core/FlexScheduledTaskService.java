@@ -41,6 +41,8 @@ public interface FlexScheduledTaskService {
 
     void add(String taskName, String cron, Runnable runnable, RetryPolicy retryPolicy);
 
+    void add(String taskName, String cron, ZoneId zoneId, RetryPolicy retryPolicy, Runnable runnable);
+
     // ─── Fixed Delay Tasks ────────────────────────────────────────────
 
     void addFixedDelayTask(String taskName, long interval, long initialDelay, Runnable runnable);

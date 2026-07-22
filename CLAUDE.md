@@ -9,7 +9,7 @@ Multi-module Spring Boot Starter library providing flex scheduling thread pool m
 - **Language**: Java 17+, Spring Boot 3.5.14
 - **Build**: Maven with wrapper
 - **Distribution**: JitPack (`io.github.wb04307201:flex-schedule-spring-boot-starter`)
-- **Tests**: 198 tests across 18 test classes
+- **Tests**: Run `./mvnw clean test` (or `mvn test`) to see current counts; this number grows as coverage is added.
 
 ## Build Commands
 
@@ -27,7 +27,8 @@ Multi-module Spring Boot Starter library providing flex scheduling thread pool m
 | `flex-schedule/` | `flex-schedule` | Core library: registrar, service, bean-method runnable, retry, timeout, chain, history, lock |
 | `flex-schedule-spring-boot-autoconfigure/` | `flex-schedule-spring-boot-autoconfigure` | `@AutoConfiguration`, endpoint, health indicator, metrics wiring |
 | `flex-schedule-spring-boot-starter/` | `flex-schedule-spring-boot-starter` | Thin starter (dependencies only) |
-| `flex-schedule-test/` | `flex-schedule-test` | JUnit 5 unit + integration tests (198 tests) |
+| `flex-schedule-test/` | `flex-schedule-test` | JUnit 5 unit + integration tests |
+| `flex-schedule-redis/` | `flex-schedule-redis` | Redis-backed `DistributedLock` (single-node SETNX) |
 
 ## Architecture
 

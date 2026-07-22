@@ -49,7 +49,7 @@ public class InMemoryExecutionHistory implements ExecutionHistory {
     @Override
     public List<ExecutionRecord> getHistory(String taskName, int limit) {
         ConcurrentLinkedDeque<ExecutionRecord> deque = historyMap.get(taskName);
-        if (deque == null) {
+        if (deque == null || limit <= 0) {
             return List.of();
         }
         List<ExecutionRecord> result = new ArrayList<>(deque);
@@ -58,6 +58,9 @@ public class InMemoryExecutionHistory implements ExecutionHistory {
 
     @Override
     public List<ExecutionRecord> getAllHistory(int limit) {
+        if (limit <= 0) {
+            return List.of();
+        }
         List<ExecutionRecord> all = new ArrayList<>();
         for (ConcurrentLinkedDeque<ExecutionRecord> deque : historyMap.values()) {
             all.addAll(deque);

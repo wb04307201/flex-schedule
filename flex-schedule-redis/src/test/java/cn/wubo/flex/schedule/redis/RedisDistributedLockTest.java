@@ -203,4 +203,49 @@ class RedisDistributedLockTest {
         // A new tryLock from B must still fail because A still holds it.
         assertFalse(lockB.tryLock(task, Duration.ofSeconds(10)));
     }
+
+    // ─── regression: race-window safety ────────────────────────────
+    //
+    // The original implementation did GET-then-DEL non-atomically. The bug:
+    //   String currentValue = redisTemplate.opsForValue().get(lockKey);
+    //   if (lockValue.equals(currentValue)) {
+    //       redisTemplate.delete(lockKey);
+    //   }
+    // `currentValue` is captured locally. If the TTL expires between that GET
+    // and the DEL — and a successor instance has already taken ownership with
+    // its own UUID — the local variable still holds our UUID, the equals
+    // check passes, and the DEL wipes the successor's lock.
+    //
+    // The atomic Lua compare-and-delete (CAS) is server-side single-shot:
+    // the server reads the value AND deletes in one round-trip, so no other
+    // client can change the value between those two steps.
+    //
+    // We model the post-expiry takeover state by directly writing a foreign
+    // UUID to the lock key and asserting the production unlock is a no-op.
+    // A separate, pure-Mockito unit test in
+    // {@link RedisDistributedLockUnlockScriptTest} additionally pins down
+    // the call-shape contract (no raw get()+delete(), only the atomic
+    // script) so the bug cannot regress without an immediate test failure.
+
+    @Test
+    void unlock_valueReplacedBetweenGetAndDelete_keepsSuccessorsLock() {
+        String task = freshTaskName();
+        assertTrue(lockA.tryLock(task, Duration.ofSeconds(10)));
+
+        // Seed: pretend the TTL expired and another instance took over with
+        // its own UUID. We can't reach into lockA's UUID (it's private), but
+        // any non-matching value is enough to exercise the no-op branch.
+        String lockKey = "flex-schedule:lock:" + task;
+        String peerUuid = "peer-instance-uuid";
+        template.opsForValue().set(lockKey, peerUuid);
+
+        // Production unlock must not delete the key — its UUID no longer
+        // matches. The Lua CAS will see peerUuid != lockA's UUID and skip.
+        lockA.unlock(task);
+
+        assertEquals(peerUuid, template.opsForValue().get(lockKey),
+            "unlock must not delete a key whose value does not match the owner's UUID");
+        assertTrue(template.hasKey(lockKey),
+            "key must still exist after a non-matching unlock");
+    }
 }

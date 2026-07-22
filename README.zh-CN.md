@@ -107,8 +107,10 @@ flex:
 
 | 方法 | 说明 |
 |------|------|
+| `task(name)` | 创建流式 `TaskBuilder` |
 | `add(name, cron, runnable [, retryPolicy])` | 注册 Cron 任务 |
 | `add(name, cron, ZoneId, runnable)` | 注册带时区的 Cron 任务 |
+| `add(name, cron, ZoneId, retryPolicy, runnable)` | 注册同时带时区和重试策略的 Cron 任务 |
 | `add(name, cron, timeout, runnable)` | 注册带执行超时的 Cron 任务 |
 | `addFixedDelayTask(name, interval, initialDelay, runnable [, retryPolicy])` | 注册固定延迟任务 |
 | `addFixedRateTask(name, interval, initialDelay, runnable [, retryPolicy])` | 注册固定频率任务 |
@@ -123,8 +125,12 @@ flex:
 | `getTaskDetail(name)` | 获取任务详情（`Optional<TaskDetail>`） |
 | `replaceCronTask / replaceFixedDelayTask / replaceFixedRateTask(...)` | 替换或新增任务 |
 | `addListener / removeListener(listener)` | 管理生命周期监听器 |
+| `setExecutionHistory(history)` | 替换执行历史存储后端 |
 | `getExecutionHistory(name, limit)` | 获取任务执行历史 |
 | `getAllExecutionHistory(limit)` | 获取所有执行历史 |
+| `clearExecutionHistory(name)` | 清除指定任务的历史；传 `null` 清除全部历史 |
+| `getTaskStatistics(name)` | 获取指定任务的汇总执行统计 |
+| `getAllTaskStatistics()` | 获取全部任务的汇总执行统计 |
 | `setDistributedLock(lock)` | 设置集群分布式锁 |
 
 - `interval` / `initialDelay` / `delay` 接受 `long`（秒）或 `Duration`（任意精度）
@@ -140,6 +146,18 @@ record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
                   boolean paused) {}
 ```
+
+### 流式任务构建器
+
+```java
+taskService.task("cleanup")
+    .fixedDelay(Duration.ofMinutes(10))
+    .timeout(Duration.ofSeconds(30))
+    .retry(RetryPolicy.fixed(3, Duration.ofSeconds(2)))
+    .register(this::cleanup);
+```
+
+通过 `cron`、`fixedDelay`、`fixedRate` 或 `oneShot` 选择且仅选择一种调度类型；`timezone`、`timeout`、`retry`、`createdAt` 等选项可按需组合。
 
 ## 高级用法
 
@@ -256,16 +274,25 @@ TaskChain.create(registrar)
 
 ### 执行历史
 
-```java
-// 启用内存执行历史（每个任务 100 条记录）
-registrar.setExecutionHistory(new InMemoryExecutionHistory(100));
+使用 Spring Boot Starter 时，执行历史会自动启用，默认通过 `InMemoryExecutionHistory` 为每个任务保留最近 100 条记录。定义自己的 `ExecutionHistory` Bean 即可替换默认存储后端。
 
+仅在手动构造 registrar 或 service 时需要显式设置：
+
+```java
+taskService.setExecutionHistory(new InMemoryExecutionHistory(100));
+```
+
+```java
 // 查询历史
 List<ExecutionRecord> records = taskService.getExecutionHistory("myTask", 10);
 // 每条记录包含：taskName, taskType, startTime, duration, success, error
 
 // 获取所有任务的历史
 List<ExecutionRecord> all = taskService.getAllExecutionHistory(50);
+
+// 汇总已记录的执行统计
+Optional<TaskStatistics> stats = taskService.getTaskStatistics("myTask");
+List<TaskStatistics> allStats = taskService.getAllTaskStatistics();
 
 // 清除历史
 taskService.clearExecutionHistory("myTask");  // 指定任务
@@ -274,28 +301,9 @@ taskService.clearExecutionHistory(null);       // 全部
 
 ### 集群感知调度（分布式锁）
 
-在多实例部署中，使用 `DistributedLock` 确保只有一个节点执行任务：
+在多实例部署中，使用 `DistributedLock` 确保只有一个节点执行任务。通过 Spring Bean 注册 `DistributedLock`；手动构造调度器时也可以调用 `taskService.setDistributedLock(lock)`。
 
-```java
-// 实现接口（或使用提供的适配器）
-@Bean
-public DistributedLock myDistributedLock(RedisTemplate<String, String> redis) {
-    return new DistributedLock() {
-        @Override
-        public boolean tryLock(String taskName, Duration lockDuration) {
-            return Boolean.TRUE.equals(
-                redis.opsForValue().setIfAbsent("lock:" + taskName, "1", lockDuration));
-        }
-        @Override
-        public void unlock(String taskName) {
-            redis.delete("lock:" + taskName);
-        }
-    };
-}
-
-// 设置到注册器
-taskService.setDistributedLock(myDistributedLock);
-```
+自定义实现必须为每次加锁绑定所有权令牌，并在释放前校验所有权。不要直接无条件删除锁 key，因为旧锁过期后可能已被其他实例重新获取。Redis 场景优先使用下方提供的实现。
 
 锁在每次执行前获取，执行后释放（即使失败也会释放）。如果另一个节点持有锁，则跳过执行。
 
@@ -311,7 +319,16 @@ taskService.setDistributedLock(myDistributedLock);
 </dependency>
 ```
 
-详情和手动覆盖示例见 [flex-schedule-redis/README.md](flex-schedule-redis/README.md)。
+Spring Data Redis 可用时，该锁会自动注入。如需显式声明：
+
+```java
+@Bean
+public DistributedLock redisDistributedLock(StringRedisTemplate redisTemplate) {
+    return new RedisDistributedLock(redisTemplate);
+}
+```
+
+详情和手动覆盖示例见 [flex-schedule-redis/README.zh-CN.md](flex-schedule-redis/README.zh-CN.md)。
 
 ### Micrometer 指标
 
@@ -340,8 +357,8 @@ flex:
 
 | Mode | 违规时行为 |
 |------|-----------|
-| `strict` | 抛 `TaskLimitExceededException`（注册时）；超期静默 cancel + 日志 |
-| `warn`   | 记录 WARN 日志后放行；超期同样 cancel（不 cancel 无意义） |
+| `strict` | 注册违规时抛出 `TaskLimitExceededException`；周期任务超期后记录日志并自动取消 |
+| `warn`   | 记录 WARN，并允许注册或已超期任务继续运行 |
 | `off`    | 完全跳过所有检查 |
 
 **作用范围**：
@@ -353,8 +370,8 @@ flex:
 
 **关键行为**：
 
-- **懒过期检查**：任务每次触发时检查 `now - createdAt ≥ max-lifetime`，命中则本次 skip + cancel 后续触发
-- **暂停中到期**：任务在暂停期间到期不会自动取消；下次 `resume()` 时会检测到并取消
+- **懒过期检查**：任务每次触发时检查 `now - createdAt ≥ max-lifetime`；`strict` 模式下命中后跳过本次执行并取消后续触发，`warn` 模式仅记录日志并继续运行
+- **暂停中到期**：任务在暂停期间到期后，会在下次 `resume()` 时检查；`strict` 模式取消任务，`warn` 模式记录日志后恢复任务
 - **`replaceXxxTask` 重置 `createdAt`**：替换任务后生命周期计时归零
 - **`createdAt` 持久化是消费者的责任**：flex-schedule 自身不再附带 JDBC 默认实现（参见 [持久化](#持久化) 章节）。如果希望任务跨重启保留 `createdAt`，消费者必须在持久化层记录原始 `createdAt`，并在恢复时通过 `TaskBuilder.createdAt(Instant)` 或 `FlexScheduledTaskRegistrar.restoreTasks()` 的 `TaskDefinition.createdAt` 字段回填。
 
@@ -422,9 +439,11 @@ flex:
 |------|---------|
 | `TaskAlreadyExistsException` | 添加重复名称的任务 |
 | `BeanMethodRunnableException` | 反射调用 Bean 方法失败 |
+| `ExecutionTimeoutException` | 任务执行时间超过配置的超时时间 |
+| `TaskLimitExceededException` | strict 模式下任务上下限校验失败 |
 | `IllegalArgumentException` | 参数校验（null/空） |
 
-均继承自 `FlexScheduleException`。
+`TaskAlreadyExistsException`、`BeanMethodRunnableException`、`ExecutionTimeoutException` 和 `TaskLimitExceededException` 均继承自 `FlexScheduleException`；参数校验使用标准的 `IllegalArgumentException`。
 
 ## 模块
 
@@ -433,7 +452,8 @@ flex:
 | `flex-schedule/` | `flex-schedule` | 核心库 |
 | `flex-schedule-spring-boot-autoconfigure/` | `flex-schedule-spring-boot-autoconfigure` | 自动配置、指标、端点 |
 | `flex-schedule-spring-boot-starter/` | `flex-schedule-spring-boot-starter` | Starter（仅依赖） |
-| `flex-schedule-test/` | `flex-schedule-test` | 测试（198 个用例） |
+| `flex-schedule-redis/` | `flex-schedule-redis` | 基于 Redis 的分布式锁实现 |
+| `flex-schedule-test/` | `flex-schedule-test` | 单元测试与集成测试 |
 
 ## 构建
 

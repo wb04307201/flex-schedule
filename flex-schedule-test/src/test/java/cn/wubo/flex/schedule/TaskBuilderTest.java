@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.ZoneId;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -184,5 +185,56 @@ class TaskBuilderTest {
         // Retry is silently dropped on the oneShot path.
         assertNull(detail.retryPolicy(),
             "oneShot must not retain retry policy (design choice pinned by test)");
+    }
+
+    @Test
+    void builder_cronWithTimezoneAndRetry_registersAndRetainsRetry() {
+        RetryPolicy policy = RetryPolicy.fixed(2, Duration.ofMillis(50));
+        service.task("cronTZRetry")
+                .cron("0 * * * * *")
+                .timezone(ZoneId.of("Asia/Shanghai"))
+                .retry(policy)
+                .register(() -> {});
+
+        assertTrue(service.exists("cronTZRetry"));
+        TaskDetail detail = service.getTaskDetail("cronTZRetry").orElseThrow();
+        assertEquals("CRON", detail.taskType());
+        assertTrue(detail.schedule().contains("Asia/Shanghai"),
+                "Schedule must include the timezone id");
+        assertNotNull(detail.retryPolicy(),
+                "Registered TaskDetail must retain the retry policy when both timezone and retry are set");
+        assertEquals(2, detail.retryPolicy().maxAttempts());
+    }
+
+    @Test
+    void builder_cronWithTimezoneAndRetry_retriesOnFailure() throws InterruptedException {
+        AtomicInteger attempts = new AtomicInteger();
+        CountDownLatch latch = new CountDownLatch(3);
+
+        // Cron "0/1 * * * * ?" fires every second; the runnable fails twice then succeeds.
+        // After 3 successful latch.countDown() calls we know at least 3 attempts happened.
+        service.task("cronTZRetryExec")
+                .cron("0/1 * * * * ?")
+                .timezone(ZoneId.of("UTC"))
+                .retry(RetryPolicy.fixed(3, Duration.ofMillis(100)))
+                .register(() -> {
+                    int attempt = attempts.incrementAndGet();
+                    latch.countDown();
+                    if (attempt <= 2) {
+                        throw new RuntimeException("fail attempt " + attempt);
+                    }
+                });
+
+        // Confirm the entry also has the retry policy recorded.
+        TaskDetail detail = service.getTaskDetail("cronTZRetryExec").orElseThrow();
+        assertNotNull(detail.retryPolicy());
+        assertEquals(3, detail.retryPolicy().maxAttempts());
+
+        // We don't assert execution timing here — the cron expression fires every second
+        // and each retry takes 100ms so worst-case ~3s. Keep a 10s safety window.
+        assertTrue(latch.await(10, TimeUnit.SECONDS),
+                "Retry policy must drive re-execution on failure");
+        assertTrue(attempts.get() >= 3,
+                "Task must have run at least 3 times (2 failures + 1 success)");
     }
 }

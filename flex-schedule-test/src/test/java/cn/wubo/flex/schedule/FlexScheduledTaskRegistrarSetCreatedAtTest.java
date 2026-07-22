@@ -170,4 +170,41 @@ class FlexScheduledTaskRegistrarSetCreatedAtTest {
         }
         assertEquals(1, safety.get());
     }
+
+    /**
+     * Empty / null taskName must not throw — the original public contract is
+     * uniformly tolerant (no-op for any invalid argument). This pins that the
+     * atomic rewrite did not newly introduce validation for empty/null names.
+     */
+    @Test
+    void setCreatedAt_emptyOrNullTaskName_isSilentNoOp() {
+        registrar.addCronTask("sentinel", "0 * * * * *", () -> {});
+
+        assertFalse(registrar.exists(""));
+        // Empty / null taskName is treated as "not found" — no exception.
+        registrar.setCreatedAt("", Instant.now());
+        registrar.setCreatedAt(null, Instant.now());
+
+        // Existing entry must be untouched.
+        assertTrue(registrar.exists("sentinel"));
+    }
+
+    /**
+     * Cancel-first ordering: register → cancel → setCreatedAt. The
+     * computeIfPresent inside setCreatedAt must observe the missing entry
+     * (ConcurrentHashMap.remove is fully visible across threads) and be a
+     * silent no-op. The cancelled entry must NOT come back.
+     */
+    @Test
+    void setCreatedAt_calledAfterCancel_doesNotResurrect() {
+        registrar.addCronTask("post-cancel", "0 * * * * *", () -> {});
+        registrar.cancel("post-cancel");
+        assertFalse(registrar.exists("post-cancel"));
+
+        Instant fixedInstant = Instant.now().minus(Duration.ofHours(2));
+        registrar.setCreatedAt("post-cancel", fixedInstant);
+
+        assertFalse(registrar.exists("post-cancel"),
+                "setCreatedAt after cancel must NOT reinsert the cancelled entry");
+    }
 }

@@ -49,6 +49,11 @@ public class DefaultFlexScheduledTaskService implements FlexScheduledTaskService
         flexScheduledTaskRegistrar.addCronTask(taskName, cron, runnable, retryPolicy);
     }
 
+    @Override
+    public void add(String taskName, String cron, ZoneId zoneId, RetryPolicy retryPolicy, Runnable runnable) {
+        flexScheduledTaskRegistrar.addCronTask(taskName, cron, zoneId, retryPolicy, runnable);
+    }
+
     // ─── Fixed Delay Tasks ────────────────────────────────────────────
 
     @Override
