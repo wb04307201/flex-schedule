@@ -18,14 +18,14 @@ with a TTL so that only the instance that wins the lock actually runs the task.
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-redis</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2</version>
 </dependency>
 ```
 
 Or Gradle:
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-redis:1.2.1'
+implementation 'io.github.wb04307201:flex-schedule-redis:1.2.2'
 ```
 
 `spring-boot-starter-data-redis` must be on the classpath for auto-configuration
