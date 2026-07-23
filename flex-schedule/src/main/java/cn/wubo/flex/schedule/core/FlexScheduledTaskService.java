@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule.core;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
@@ -39,6 +40,8 @@ public interface FlexScheduledTaskService {
     void add(String taskName, String cron, Duration timeout, Runnable runnable);
 
     void add(String taskName, String cron, Runnable runnable, RetryPolicy retryPolicy);
+
+    void add(String taskName, String cron, ZoneId zoneId, RetryPolicy retryPolicy, Runnable runnable);
 
     // ─── Fixed Delay Tasks ────────────────────────────────────────────
 
@@ -85,6 +88,20 @@ public interface FlexScheduledTaskService {
     void resume(String taskName);
 
     boolean isPaused(String taskName);
+
+    /**
+     * Overrides the {@code createdAt} of an already-registered task. Used by
+     * persistence-aware consumers (typically a startup restore listener) to
+     * preserve a task's logical age across application restarts so that the
+     * {@code max-lifetime} ceiling continues to apply.
+     * <p>
+     * No-op if the task is not registered or {@code createdAt} is {@code null}.
+     * </p>
+     *
+     * @param taskName  the task name
+     * @param createdAt the instant the task should be considered as created
+     */
+    void setCreatedAt(String taskName, Instant createdAt);
 
     // ─── Query ────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule.core;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 
 /**
@@ -28,6 +29,7 @@ public class TaskBuilder {
     private Duration fixedRate;
     private Duration initialDelay = Duration.ZERO;
     private Duration oneShotDelay;
+    private Instant createdAt;
 
     TaskBuilder(FlexScheduledTaskService service, String taskName) {
         this.service = service;
@@ -109,6 +111,26 @@ public class TaskBuilder {
     }
 
     /**
+     * Sets the logical {@code createdAt} of the task. Used by persistence-aware
+     * consumers (e.g. a startup restore listener) to preserve a task's age across
+     * application restarts so the {@code max-lifetime} ceiling still fires when
+     * expected.
+     * <p>
+     * Pass {@code null} (the default) to keep the registrar's {@code Instant.now()}
+     * stamping behavior. A non-null value is applied via
+     * {@link FlexScheduledTaskRegistrar#setCreatedAt(String, Instant)} immediately
+     * after {@link #register(Runnable)} dispatches the task into the scheduler.
+     * </p>
+     *
+     * @param createdAt the instant the task should be considered as created
+     * @return this builder for chaining
+     */
+    public TaskBuilder createdAt(Instant createdAt) {
+        this.createdAt = createdAt;
+        return this;
+    }
+
+    /**
      * Registers the task with the configured settings.
      *
      * @param runnable the task implementation
@@ -137,7 +159,9 @@ public class TaskBuilder {
                 service.addFixedRateTask(taskName, fixedRate, initialDelay, wrapped);
             }
         } else if (cron != null) {
-            if (timezone != null) {
+            if (timezone != null && retryPolicy != null) {
+                service.add(taskName, cron, timezone, retryPolicy, wrapped);
+            } else if (timezone != null) {
                 service.add(taskName, cron, timezone, wrapped);
             } else if (retryPolicy != null) {
                 service.add(taskName, cron, wrapped, retryPolicy);
@@ -146,6 +170,12 @@ public class TaskBuilder {
             }
         } else {
             throw new IllegalStateException("No scheduling type configured. Use cron(), fixedDelay(), fixedRate(), or oneShot().");
+        }
+
+        // Apply caller-supplied createdAt override AFTER the dispatcher populated
+        // taskMap so the entry actually exists for setCreatedAt to mutate.
+        if (createdAt != null) {
+            service.setCreatedAt(taskName, createdAt);
         }
     }
 }

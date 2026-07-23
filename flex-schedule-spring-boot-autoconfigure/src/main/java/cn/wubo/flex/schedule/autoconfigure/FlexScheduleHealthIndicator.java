@@ -39,22 +39,26 @@ public class FlexScheduleHealthIndicator implements HealthIndicator {
                             .orElse(false))
                     .count();
 
-            // Thread pool stats
-            int poolSize = taskScheduler.getPoolSize();
-            int activeCount = taskScheduler.getActiveCount();
-            long completedTaskCount = taskScheduler.getScheduledThreadPoolExecutor().getCompletedTaskCount();
-
             Health.Builder builder = Health.up()
                     .withDetail("totalTasks", totalTasks)
                     .withDetail("activeTasks", totalTasks - pausedTasks)
-                    .withDetail("pausedTasks", pausedTasks)
-                    .withDetail("poolSize", poolSize)
-                    .withDetail("activeThreads", activeCount)
-                    .withDetail("completedExecutions", completedTaskCount);
+                    .withDetail("pausedTasks", pausedTasks);
 
-            // Warn if thread pool is heavily utilized
-            if (poolSize > 0 && activeCount >= poolSize * 0.8) {
-                builder.withDetail("warning", "Thread pool is heavily utilized (>= 80%)");
+            // Thread pool stats — defensive: the scheduler may have been
+            // destroyed or replaced (e.g., across hot-reload or in tests).
+            if (taskScheduler != null) {
+                int poolSize = taskScheduler.getPoolSize();
+                int activeCount = taskScheduler.getActiveCount();
+                long completedTaskCount = taskScheduler.getScheduledThreadPoolExecutor().getCompletedTaskCount();
+                builder.withDetail("poolSize", poolSize)
+                        .withDetail("activeThreads", activeCount)
+                        .withDetail("completedExecutions", completedTaskCount);
+                // Warn if thread pool is heavily utilized
+                if (poolSize > 0 && activeCount >= poolSize * 0.8) {
+                    builder.withDetail("warning", "Thread pool is heavily utilized (>= 80%)");
+                }
+            } else {
+                builder.withDetail("warning", "Task scheduler is not available");
             }
 
             return builder.build();
