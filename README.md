@@ -43,14 +43,14 @@
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-spring-boot-starter</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.1'
+implementation 'io.github.wb04307201:flex-schedule-spring-boot-starter:1.2.2'
 ```
 
 ## Quick Start

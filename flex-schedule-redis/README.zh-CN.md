@@ -17,14 +17,14 @@
 <dependency>
     <groupId>io.github.wb04307201</groupId>
     <artifactId>flex-schedule-redis</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2</version>
 </dependency>
 ```
 
 或者 Gradle：
 
 ```groovy
-implementation 'io.github.wb04307201:flex-schedule-redis:1.2.1'
+implementation 'io.github.wb04307201:flex-schedule-redis:1.2.2'
 ```
 
 `spring-boot-starter-data-redis` 必须存在于 classpath，自动装配才会生效。
