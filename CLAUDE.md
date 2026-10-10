@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Multi-module Spring Boot Starter library providing flex scheduling thread pool management. Allows adding/removing/pausing scheduled tasks at runtime using cron, fixedDelay, or fixedRate expressions. Supports retry, execution timeout, task chains, execution history, cluster-aware scheduling, Micrometer metrics, and an Actuator endpoint.
 
-- **Language**: Java 17+, Spring Boot 3.5.14
+- **Language**: Java 25+, Spring Boot 4.1.1
 - **Build**: Maven with wrapper
 - **Distribution**: JitPack (`io.github.wb04307201:flex-schedule-spring-boot-starter`)
 - **Tests**: Run `./mvnw clean test` (or `mvn test`) to see current counts; this number grows as coverage is added.
@@ -32,7 +32,7 @@ Multi-module Spring Boot Starter library providing flex scheduling thread pool m
 
 ## Architecture
 
-**Auto-configuration**: `FlexScheduleAutoConfiguration` uses `@AutoConfiguration` with inner `@Configuration` classes for endpoint, metrics, and health indicator. Activated by default. Disabled via `flex.schedule.enabled=false`.
+**Auto-configuration**: `FlexScheduleAutoConfiguration` is declared `@AutoConfiguration` and exposes the core beans (thread pool, registrar, service, default `ExecutionHistory`, `TaskLimits`, Spring context utils). The optional pieces — endpoint, Micrometer wiring, health indicator, and Redis distributed lock — are split into **sibling top-level `@AutoConfiguration` classes** (`FlexScheduleEndpointAutoConfiguration`, `FlexScheduleMetricsAutoConfiguration`, `FlexScheduleHealthAutoConfiguration`, `FlexScheduleRedisLockAutoConfiguration`). Spring Boot 4 no longer auto-discovers nested `@Configuration` classes inside an outer `@AutoConfiguration`, so each fragment must be its own top-level class registered in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. Activated by default; disabled via `flex.schedule.enabled=false`.
 
 **Core bean wiring**: `ThreadPoolTaskScheduler` → `FlexScheduledTaskRegistrar` → `FlexScheduledTaskService`. All beans prefixed `flexSchedule*`.
 

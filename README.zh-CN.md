@@ -8,10 +8,9 @@
 
 ![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/flex-schedule-spring-boot-starter?style=flat-square)
 [![star](https://gitee.com/wb04307201/flex-schedule/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
-[![fork](https://gitee.com/wb04307201/flex-schedule/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
 [![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
-[![fork](https://img.shields.io/github/forks/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)  
-![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)
+[![GitCode Star](https://gitcode.com/wb04307201/flex-schedule/star/badge.svg)](https://gitcode.com/wb04307201/flex-schedule/overview)
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-25+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-4+-green.svg)
 
 ---
 
@@ -229,13 +228,33 @@ taskService.resume("myTask");
 flex-schedule **不提供持久化默认实现** — 调度核心是纯内存的（`InMemoryTaskRepository`）。
 需要任务跨重启存活时，由消费者自行提供 `TaskRepository` bean。
 
-**消费方通常的做法**：
+**两种触发形式，两种持久化姿势**：
 
-1. 用 JDBC、Redis 或同类存储把 `TaskDefinition`（含 `beanName`/`methodName`/`createdAt`）持久化。
-2. 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()`，它会读取 `TaskRepository.findAll()` 并按 `createdAt` 还原。非 bean-method 形式的触发器（如 lambda、prompt-driven），改用 `FlexScheduledTaskService.setCreatedAt(name, instant)`（或在 `register(...)` 之前用 `TaskBuilder.createdAt(Instant)`）把原始创建时间写回到内存条目上。
-3. 如果触发器不是 bean-method 反射形式（如 lambda、prompt-driven），可在 `TaskBuilder.register(...)` 之前调用 `TaskBuilder.createdAt(Instant)` 直接覆盖默认值（不需要走 `restoreTasks()`）。
+1. **bean-method 触发**（已持有 `TaskDefinition`）：
+   - 把 `TaskDefinition`（含 `beanName` / `methodName` / `createdAt`）持久化到自有的存储。
+   - 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()` —— 它读取
+     `TaskRepository.findAll()` 并按持久化的 `createdAt` 还原每条记录。
 
-参考消费方 `spring-ai-loom-agent` 的 `ScheduleRestoreListener`，演示了 prompt-driven 调度如何通过 `TaskBuilder.createdAt(...)` + `ApplicationReadyEvent` 接管整个恢复生命周期。
+2. **lambda / prompt-driven 触发**（持有的是裸 runnable）：
+   - 把自己需要的信息持久化下来。
+   - 启动时通过 `TaskBuilder.createdAt(Instant)` **在** `.register(...)` **之前**
+     设置（或先 `register(...)`，再调 `FlexScheduledTaskService.setCreatedAt(name, instant)`），
+     让 `max-lifetime` 跨重启按原时刻继续计时。示例：
+
+   ```java
+   @Component
+   class ScheduleRestoreListener {
+       @EventListener(ApplicationReadyEvent.class)
+       void onReady(FlexScheduledTaskService svc, PromptTaskStore store) {
+           store.allOwnedTasks().forEach(rec ->
+               svc.task(rec.name())
+                  .cron(rec.cron())
+                  .createdAt(rec.createdAt())    // 保留原始 lifetime
+                  .register(() -> runPrompt(rec))
+           );
+       }
+   }
+   ```
 
 > 历史注意：早期版本曾自动装配一个 `JdbcTaskRepository`（H2）。该 bean 会创建 `flex_scheduled_task` 表但从不写入任何行 — 实际是死代码且会让高级用户误以为 H2 是推荐默认。已移除。
 
@@ -377,7 +396,7 @@ flex:
 
 ### Actuator 端点
 
-当 `spring-boot-starter-actuator` + `spring-boot-starter-web` 在 classpath 时启用。
+当 `spring-boot-starter-actuator` + `spring-boot-starter-webmvc` 在 classpath 时启用（Boot 4 将 `starter-web` 重命名为 `starter-webmvc`）。
 
 ```yaml
 management:
