@@ -4,8 +4,8 @@ import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.time.Duration;

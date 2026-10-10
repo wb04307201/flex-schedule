@@ -1,1 +1,5 @@
 cn.wubo.flex.schedule.autoconfigure.FlexScheduleAutoConfiguration
+cn.wubo.flex.schedule.autoconfigure.FlexScheduleEndpointAutoConfiguration
+cn.wubo.flex.schedule.autoconfigure.FlexScheduleMetricsAutoConfiguration
+cn.wubo.flex.schedule.autoconfigure.FlexScheduleHealthAutoConfiguration
+cn.wubo.flex.schedule.autoconfigure.FlexScheduleRedisLockAutoConfiguration
