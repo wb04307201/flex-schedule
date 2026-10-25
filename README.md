@@ -9,7 +9,7 @@
 ![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/flex-schedule-spring-boot-starter?style=flat-square)
 [![star](https://gitee.com/wb04307201/flex-schedule/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
 [![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
-[![GitCode Star](https://gitcode.com/wb04307201/flex-schedule/star/badge.svg)](https://gitcode.com/wb04307201/flex-schedule/overview)
+[![star](https://gitcode.com/wb04307201/flex-schedule/star/badge.svg)](https://gitcode.com/wb04307201/flex-schedule/overview)
 ![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-25+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-4+-green.svg)
 
 ---
