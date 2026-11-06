@@ -588,47 +588,58 @@ class MisfirePolicyBehaviorTest {
     @Test
     void restoreTasks_pausedDefinition_usesUpdatedAtAsGapStart() throws Exception {
         // Wire a minimal Spring context so BeanMethodRunnable can resolve the bean
-        // (same pattern as FlexScheduledTaskLimitsTest restore tests).
+        // (same pattern as FlexScheduledTaskLimitsTest restore tests). SpringContextUtils
+        // holds STATIC, first-write-wins state: capture the previous value and restore it
+        // in finally (disclosed pattern from RegistrarRestoreTasksEdgeTest) so this test
+        // neither depends on nor pollutes later classes (BeanMethodRunnableTest is the
+        // most exposed victim of a leaked closed context).
         Field field = SpringContextUtils.class.getDeclaredField("applicationContext");
         field.setAccessible(true);
+        Object previousStaticContext = field.get(null);
         field.set(null, null);
+
         org.springframework.context.support.StaticApplicationContext ctx =
                 new org.springframework.context.support.StaticApplicationContext();
-        CountingBean bean = new CountingBean();
-        ctx.getBeanFactory().registerSingleton("countingBean", bean);
-        ctx.refresh();
-        new SpringContextUtils().setApplicationContext(ctx);
+        try {
+            CountingBean bean = new CountingBean();
+            ctx.getBeanFactory().registerSingleton("countingBean", bean);
+            ctx.refresh();
+            new SpringContextUtils().setApplicationContext(ctx);
 
-        Instant updatedAt = Instant.now().minusMillis(400);
-        TaskDefinition def = TaskDefinition.builder("restoredPaused", "FIXED_DELAY")
-                .interval(Duration.ofSeconds(5))     // long interval: no regular fire in-window
-                .initialDelay(Duration.ofSeconds(10))
-                .beanName("countingBean")
-                .methodName("tick")
-                .paused(true)
-                .createdAt(updatedAt)
-                .updatedAt(updatedAt)
-                .misfirePolicy(MisfirePolicy.FIRE_ONCE)
-                .misfireThreshold(Duration.ofSeconds(30))
-                .build();
-        TaskRepository repo = new InMemoryTaskRepository();
-        repo.save(def);
+            Instant updatedAt = Instant.now().minusMillis(400);
+            TaskDefinition def = TaskDefinition.builder("restoredPaused", "FIXED_DELAY")
+                    .interval(Duration.ofSeconds(5))     // long interval: no regular fire in-window
+                    .initialDelay(Duration.ofSeconds(10))
+                    .beanName("countingBean")
+                    .methodName("tick")
+                    .paused(true)
+                    .createdAt(updatedAt)
+                    .updatedAt(updatedAt)
+                    .misfirePolicy(MisfirePolicy.FIRE_ONCE)
+                    .misfireThreshold(Duration.ofSeconds(30))
+                    .build();
+            TaskRepository repo = new InMemoryTaskRepository();
+            repo.save(def);
 
-        FlexScheduledTaskRegistrar r = newRegistrar(2, "misfire-restore-", null);
-        r.setTaskRepository(repo);
-        r.restoreTasks();
+            FlexScheduledTaskRegistrar r = newRegistrar(2, "misfire-restore-", null);
+            r.setTaskRepository(repo);
+            r.restoreTasks();
 
-        assertTrue(r.isPaused("restoredPaused"), "restored definition with paused=true must be paused");
-        FlexScheduledTaskRegistrar.ScheduledTaskEntry entry = readEntry(r, "restoredPaused");
-        assertNotNull(entry, "entry should exist after restore");
-        assertEquals(updatedAt, entry.pausedAt(),
-                "pausedAt must be seeded from the definition's updatedAt, not the restore time");
+            assertTrue(r.isPaused("restoredPaused"), "restored definition with paused=true must be paused");
+            FlexScheduledTaskRegistrar.ScheduledTaskEntry entry = readEntry(r, "restoredPaused");
+            assertNotNull(entry, "entry should exist after restore");
+            assertEquals(updatedAt, entry.pausedAt(),
+                    "pausedAt must be seeded from the definition's updatedAt, not the restore time");
 
-        r.resume("restoredPaused");
-        awaitTrue(() -> bean.count.get() >= 1, 3000,
-                "FIRE_ONCE catch-up should run once after resuming the restored task");
-        Thread.sleep(400); // stable-poll window; next regular fire is >= 5s away
-        assertEquals(1, bean.count.get(), "exactly one catch-up execution");
+            r.resume("restoredPaused");
+            awaitTrue(() -> bean.count.get() >= 1, 3000,
+                    "FIRE_ONCE catch-up should run once after resuming the restored task");
+            Thread.sleep(400); // stable-poll window; next regular fire is >= 5s away
+            assertEquals(1, bean.count.get(), "exactly one catch-up execution");
+        } finally {
+            ctx.close();
+            field.set(null, previousStaticContext);
+        }
     }
 
     // ─── 13. ONE_SHOT ignores the misfire policy entirely ─────────────
