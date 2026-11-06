@@ -35,3 +35,4 @@ build/
 
 ### Demo app (git-ignored) ###
 demo/
+.superpowers/
