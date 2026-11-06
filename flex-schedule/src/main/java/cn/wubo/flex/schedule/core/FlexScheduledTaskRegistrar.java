@@ -9,6 +9,7 @@ import org.springframework.util.Assert;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -23,9 +24,38 @@ import org.springframework.scheduling.support.CronExpression;
 @Slf4j
 public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
 
+    /**
+     * Hard cap on the number of catch-up executions replayed on resume for
+     * {@link MisfirePolicy#FIRE_IMMEDIATELY}. Deliberately a registrar constant,
+     * not exposed as configuration.
+     */
+    static final int MAX_CATCH_UP = 10;
+
     private final Map<String, ScheduledTaskEntry> taskMap = new ConcurrentHashMap<>(16);
     private final Set<String> pausedTasks = ConcurrentHashMap.newKeySet();
     private final List<TaskExecutionListener> listeners = new CopyOnWriteArrayList<>();
+    /** Per-task misfire configuration (policy + threshold). Absent = misfire handling disabled for the task. */
+    private final Map<String, MisfireConfig> misfireConfigs = new ConcurrentHashMap<>();
+    /**
+     * Next expected fire time per recurring task, used for runtime late-fire detection.
+     * <p>
+     * Expected-fire model (chosen for determinism):
+     * <ul>
+     *   <li>FIXED_DELAY: start-based cadence — after each judged fire, expected = fireStart + interval.</li>
+     *   <li>FIXED_RATE: grid-based — expected advances by interval until strictly after the actual start.</li>
+     *   <li>CRON: expected = next {@link CronExpression} boundary after the actual start (task timezone).</li>
+     * </ul>
+     * The first fire after registration, {@link #setMisfireConfig}, or {@link #resume}
+     * only seeds the baseline and is never itself judged (the tracker holds no entry).
+     * Consequences, all deliberate and deterministic: paused fires do not advance the
+     * tracker (the pause gap is settled by resume() catch-up instead); the restart gap
+     * of restored, non-paused tasks is NOT compensated; and for FIXED_DELAY a delegate
+     * whose own runtime exceeds the threshold registers as lateness on the next fire
+     * (start-based cadence limitation).
+     */
+    private final Map<String, Instant> nextExpectedFire = new ConcurrentHashMap<>();
+    /** Outermost wrapped (instrumented, retry-aware) runnable per task, replayed serially for resume catch-up. */
+    private final Map<String, Runnable> instrumentedRunnables = new ConcurrentHashMap<>();
     private final long awaitTerminationSeconds;
     private final AtomicReference<MetricsRecorder> metricsRecorder = new AtomicReference<>(MetricsRecorder.NOOP);
     private volatile ExecutionHistory executionHistory = ExecutionHistory.NOOP;
@@ -154,6 +184,18 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     /**
      * Restores tasks from the repository on startup.
      * This method should be called after the registrar is fully initialized.
+     * <p>
+     * Misfire wiring (1.3.0): each definition's {@code misfirePolicy()}/{@code misfireThreshold()}
+     * are applied to the restored task. Definitions with {@code paused() == true} are restored
+     * in the paused state with {@code pausedAt} anchored at the definition's {@code updatedAt()},
+     * so a later {@link #resume(String)} settles the pause gap that spans the restart.
+     * </p>
+     * <p>
+     * <b>Limitation:</b> the restart gap of restored tasks that are NOT paused is never
+     * compensated — no catch-up executions are replayed for fires missed while the
+     * application was down, and late-fire detection starts fresh from the first fire
+     * after restore.
+     * </p>
      */
     public void restoreTasks() {
         List<TaskDefinition> definitions = taskRepository.findAll();
@@ -181,15 +223,30 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                     ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel,
                             def.taskType(), describeSchedule(def), def.retryPolicy(), false, createdAt);
                     taskMap.put(def.taskName(), entry);
+                    // Misfire settings persisted on the definition reach the runtime here.
+                    // The expected-fire tracker is NOT seeded on restore: the first fire
+                    // after restart seeds a fresh baseline, so the restart gap of non-paused
+                    // restored tasks is never judged as a misfire and never compensated.
+                    if (def.misfirePolicy() != null && def.misfireThreshold() != null
+                            && !"ONE_SHOT".equals(def.taskType())) {
+                        misfireConfigs.put(def.taskName(),
+                                new MisfireConfig(def.misfirePolicy(), def.misfireThreshold()));
+                    }
                     log.info("Restored task [{}] of type [{}] (createdAt={})",
                              def.taskName(), def.taskType(), createdAt);
                 } catch (Exception e) {
                     taskMap.remove(def.taskName());
+                    clearTaskTrackingState(def.taskName());
                     throw e;
                 }
 
                 if (def.paused()) {
                     pause(def.taskName());
+                    // The pause started when the definition was last updated (typically
+                    // before the restart), so a later resume() settles the gap from there.
+                    Instant persistedPausedAt = def.updatedAt() != null ? def.updatedAt() : Instant.now();
+                    taskMap.computeIfPresent(def.taskName(), (key, current) ->
+                            withPausedAt(current, persistedPausedAt));
                 }
             } catch (Exception e) {
                 log.error("Failed to restore task [{}]: {}", def.taskName(), e.getMessage(), e);
@@ -630,6 +687,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
                 log.info("{} cron task [{}] with expression [{}]",
                         replaced[0] ? "Replaced" : "Added", taskName, cron);
+                // Fresh schedule: reset expected-fire tracking so the first fire
+                // after replace re-seeds the baseline instead of being judged
+                // against the replaced cadence.
+                nextExpectedFire.remove(taskName);
                 return new ScheduledTaskEntry(scheduledTask::cancel, "CRON", cron);
             });
         } catch (RuntimeException ex) {
@@ -674,6 +735,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
                 log.info("{} fixed-delay task [{}] interval={} initialDelay={}",
                         existed[0] ? "Replaced" : "Added", taskName, interval, initialDelay);
+                // Fresh schedule: reset expected-fire tracking (see replaceCronTask).
+                nextExpectedFire.remove(taskName);
                 return new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_DELAY",
                         interval + "/" + initialDelay);
             });
@@ -716,6 +779,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
                 log.info("{} fixed-rate task [{}] interval={} initialDelay={}",
                         existed[0] ? "Replaced" : "Added", taskName, interval, initialDelay);
+                // Fresh schedule: reset expected-fire tracking (see replaceCronTask).
+                nextExpectedFire.remove(taskName);
                 return new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_RATE",
                         interval + "/" + initialDelay);
             });
@@ -779,6 +844,9 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     /**
      * Pauses a task, preventing it from executing until resumed.
      * The task remains registered but will skip execution.
+     * <p>
+     * Records {@code pausedAt} on the entry so a later {@link #resume(String)} can
+     * settle the pause gap with catch-up executions per the task's {@link MisfirePolicy}.
      *
      * @param taskName task name to pause
      */
@@ -789,11 +857,29 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             return;
         }
         pausedTasks.add(taskName);
+        Instant pausedAt = Instant.now();
+        taskMap.computeIfPresent(taskName, (key, current) -> withPausedAt(current, pausedAt));
         log.info("Paused task [{}]", taskName);
     }
 
     /**
      * Resumes a paused task, allowing it to execute again.
+     * <p>
+     * Misfire settlement: before the existing max-lifetime expiration check runs, the
+     * pause gap ({@code pausedAt → now}) is settled according to the task's
+     * {@link MisfirePolicy}:
+     * <ul>
+     *   <li>{@link MisfirePolicy#SKIP} — no catch-up executions;</li>
+     *   <li>{@link MisfirePolicy#FIRE_ONCE} — exactly one catch-up execution;</li>
+     *   <li>{@link MisfirePolicy#FIRE_IMMEDIATELY} — {@code min(missed, MAX_CATCH_UP)}
+     *       catch-up executions, where {@code missed} is the number of firings that
+     *       elapsed during the pause (gap/interval for fixed tasks, cron iteration
+     *       for cron tasks).</li>
+     * </ul>
+     * Catch-up executions run serially on the scheduler thread through the full
+     * instrumented pipeline (lock, listeners, history, metrics). If the task has
+     * exceeded its max lifetime it is cancelled with NO catch-up. Re-pausing during
+     * a catch-up burst aborts the remaining executions. One-shot tasks never catch up.
      *
      * @param taskName task name to resume
      */
@@ -804,6 +890,9 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             log.warn("Task [{}] not found, resume skipped", taskName);
             return;
         }
+        // Settle the pause-gap catch-up plan BEFORE the expiration check so an
+        // expired task is cancelled without any catch-up executions.
+        int catchUpCount = computeCatchUpCount(taskName, entry);
         if (limitsChecker.isExpired(taskName, entry.createdAt())) {
             // Atomic check-and-remove: only cancel if this entry is still the one in the map.
             // A concurrent replaceXxxTask could have swapped it for a fresh entry; preserve that.
@@ -815,7 +904,25 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             return;
         }
         if (pausedTasks.remove(taskName)) {
-            log.info("Resumed task [{}]", taskName);
+            // Clear pausedAt and capture the live entry identity for catch-up guarding.
+            final ScheduledTaskEntry[] cleared = new ScheduledTaskEntry[1];
+            taskMap.computeIfPresent(taskName, (key, current) -> {
+                cleared[0] = withPausedAt(current, null);
+                return cleared[0];
+            });
+            ScheduledTaskEntry live = cleared[0] != null ? cleared[0] : entry;
+            if (!live.oneShot()) {
+                // The pause gap has just been settled by catch-up: clear the tracker so
+                // the first fire after resume re-seeds the baseline unjudged.
+                resetExpectedFireOnResume(taskName);
+            }
+            if (catchUpCount > 0) {
+                log.info("Resumed task [{}] with {} catch-up execution(s) per misfire policy {}",
+                        taskName, catchUpCount, misfireConfigOrDefault(taskName).policy());
+                scheduleCatchUp(taskName, live, catchUpCount);
+            } else {
+                log.info("Resumed task [{}]", taskName);
+            }
         } else {
             log.warn("Task [{}] was not paused, resume skipped", taskName);
         }
@@ -839,6 +946,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         if (entry != null) {
             entry.cancelAction().run();
             pausedTasks.remove(taskName);
+            clearTaskTrackingState(taskName);
             log.info("Cancelled task [{}]", taskName);
         } else {
             log.warn("Task [{}] not found, cancel skipped", taskName);
@@ -855,6 +963,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         if (taskMap.remove(taskName, expectedEntry)) {
             expectedEntry.cancelAction().run();
             pausedTasks.remove(taskName);
+            clearTaskTrackingState(taskName);
             log.info("Cancelled task [{}]", taskName);
             return true;
         }
@@ -900,10 +1009,48 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                     current.schedule(),
                     current.retryPolicy(),
                     current.oneShot(),
-                    createdAt);
+                    createdAt,
+                    current.pausedAt());
         });
         if (!updated[0]) {
             log.warn("Cannot setCreatedAt for task [{}]: not registered", taskName);
+        }
+    }
+
+    /**
+     * Configures the misfire policy and lateness threshold for an already-registered
+     * recurring task (CRON, FIXED_DELAY, FIXED_RATE). Mirrors the post-registration
+     * wiring pattern of {@link #setCreatedAt(String, Instant)} and is the mechanism
+     * {@link TaskBuilder#register(Runnable)} uses to make its fluent
+     * {@code misfirePolicy}/{@code misfireThreshold} values reach the runtime.
+     * <p>
+     * Tasks without an explicit configuration are exempt from misfire detection and
+     * pause-gap catch-up entirely (1.2.x behavior). ONE_SHOT tasks accept the call
+     * but ignore the configuration at runtime. Calling this method (re-)seeds the
+     * expected-fire baseline, so the first fire judged for lateness is the next one
+     * after this call.
+     * <p>
+     * No-op with a WARN log if the task is not registered.
+     *
+     * @param taskName  the task name; must not be empty
+     * @param policy    the misfire policy; must not be null
+     * @param threshold lateness beyond which a fire is a misfire; must be positive
+     */
+    public void setMisfireConfig(String taskName, MisfirePolicy policy, Duration threshold) {
+        Assert.hasText(taskName, "taskName must not be empty");
+        Assert.notNull(policy, "misfirePolicy must not be null");
+        Assert.notNull(threshold, "misfireThreshold must not be null");
+        Assert.isTrue(threshold.compareTo(Duration.ZERO) > 0,
+                "misfireThreshold must be positive, was " + threshold);
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null) {
+            log.warn("Cannot set misfire config for task [{}]: not registered", taskName);
+            return;
+        }
+        misfireConfigs.put(taskName, new MisfireConfig(policy, threshold));
+        if (!entry.oneShot()) {
+            // Clear the tracker: the next fire seeds a fresh baseline unjudged.
+            nextExpectedFire.remove(taskName);
         }
     }
 
@@ -955,6 +1102,9 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         });
         taskMap.clear();
         pausedTasks.clear();
+        nextExpectedFire.clear();
+        misfireConfigs.clear();
+        instrumentedRunnables.clear();
 
         // Shutdown the scheduler executor
         ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler) this.getScheduler();
@@ -1055,6 +1205,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 if (taskMap.remove(taskName, entry)) {
                     entry.cancelAction().run();
                     pausedTasks.remove(taskName);
+                    clearTaskTrackingState(taskName);
                     log.info("Cancelled task [{}]", taskName);
                 }
                 return;
@@ -1063,6 +1214,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             // 2. Check if task is paused
             if (pausedTasks.contains(taskName)) {
                 log.debug("Task [{}] is paused, skipping execution", taskName);
+                return;
+            }
+
+            // 2b. Misfire detection (must precede lock acquisition so a skipped fire
+            // never takes the distributed lock). SKIP returns without executing;
+            // FIRE_ONCE/FIRE_IMMEDIATELY fall through and execute as normal.
+            if (handleMisfire(taskName, Instant.now())) {
                 return;
             }
 
@@ -1244,6 +1402,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 delegate.run();
             } finally {
                 taskMap.remove(taskName);
+                clearTaskTrackingState(taskName);
                 log.info("One-shot task [{}] completed and removed", taskName);
             }
         };
@@ -1254,18 +1413,288 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         return entry != null ? entry.taskType() : "UNKNOWN";
     }
 
+    // ─── Misfire Handling ────────────────────────────────────────────
+
+    /**
+     * Runtime late-fire detection, invoked at the front of the instrument() pipeline
+     * (after the paused check, before lock acquisition). Returns {@code true} when the
+     * fire must be skipped (policy {@link MisfirePolicy#SKIP} and lateness strictly
+     * greater than the configured threshold); returns {@code false} when execution
+     * should proceed (on time, below-or-equal threshold, unconfigured task, one-shot
+     * task, or policies FIRE_ONCE/FIRE_IMMEDIATELY which log + record but still run).
+     * <p>
+     * Also maintains the {@link #nextExpectedFire} tracker: the expected time is
+     * advanced for the next cadence step on every judged fire, and the first judged
+     * fire of a task only seeds the baseline (never flagged).
+     *
+     * @param taskName    the task name
+     * @param actualStart the instant the fire actually started
+     * @return {@code true} to skip this execution
+     */
+    private boolean handleMisfire(String taskName, Instant actualStart) {
+        MisfireConfig config = misfireConfigs.get(taskName);
+        if (config == null) {
+            return false; // misfire handling not configured for this task (1.2.x behavior)
+        }
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null || entry.oneShot()) {
+            return false; // ONE_SHOT tasks ignore the misfire policy entirely
+        }
+
+        Instant expected = nextExpectedFire.get(taskName);
+        advanceExpectedFire(taskName, entry, actualStart);
+        if (expected == null) {
+            return false; // first judged fire: baseline seeded, nothing to compare against
+        }
+
+        Duration lateness = Duration.between(expected, actualStart);
+        if (lateness.compareTo(config.threshold()) <= 0) {
+            return false; // strictly greater than threshold counts as a misfire
+        }
+
+        String taskType = entry.taskType();
+        log.warn("Task [{}] fire is late by {} (expected {}, threshold {}) — misfire policy {}",
+                taskName, lateness, expected, config.threshold(), config.policy());
+        getMetricsRecorder().recordMisfire(taskName, taskType, config.policy());
+        if (config.policy() == MisfirePolicy.SKIP) {
+            executionHistory.record(new ExecutionRecord(taskName, taskType, actualStart,
+                    Duration.ZERO, false,
+                    "MISFIRE_SKIPPED: fire was late by " + lateness
+                            + " (expected " + expected + ", threshold " + config.threshold() + ")"));
+            return true;
+        }
+        return false; // FIRE_ONCE / FIRE_IMMEDIATELY: late fire still executes
+    }
+
+    /**
+     * Advances the expected-fire tracker for the next cadence step from {@code actualStart}:
+     * FIXED_DELAY start-based ({@code actualStart + interval}), FIXED_RATE grid-based
+     * (advance by interval until strictly after {@code actualStart}), CRON next boundary.
+     */
+    private void advanceExpectedFire(String taskName, ScheduledTaskEntry entry, Instant actualStart) {
+        switch (entry.taskType()) {
+            case "FIXED_DELAY" -> {
+                Duration interval = parseScheduleInterval(entry.schedule());
+                if (interval != null) {
+                    nextExpectedFire.put(taskName, actualStart.plus(interval));
+                }
+            }
+            case "FIXED_RATE" -> {
+                Duration interval = parseScheduleInterval(entry.schedule());
+                if (interval != null && !interval.isZero()) {
+                    Instant next = nextExpectedFire.get(taskName);
+                    if (next == null) {
+                        next = actualStart;
+                    }
+                    while (!next.isAfter(actualStart)) {
+                        next = next.plus(interval);
+                    }
+                    nextExpectedFire.put(taskName, next);
+                }
+            }
+            case "CRON" -> {
+                CronExpression cron = parseScheduleCron(entry.schedule());
+                if (cron != null) {
+                    ZonedDateTime next = cron.next(actualStart.atZone(parseScheduleZone(entry.schedule())));
+                    if (next != null) {
+                        nextExpectedFire.put(taskName, next.toInstant());
+                    }
+                }
+            }
+            default -> { /* ONE_SHOT and unknown types are not tracked */ }
+        }
+    }
+
+    /**
+     * Re-seeds the expected-fire baseline on resume: the pause gap has already been
+     * settled by catch-up, so the tracker is cleared and the next fire seeds a fresh
+     * baseline unjudged.
+     */
+    private void resetExpectedFireOnResume(String taskName) {
+        nextExpectedFire.remove(taskName);
+    }
+
+    /**
+     * Computes how many catch-up executions the pause gap ({@code pausedAt → now})
+     * requires under the task's {@link MisfirePolicy}: SKIP → 0, FIRE_ONCE → 1,
+     * FIRE_IMMEDIATELY → {@code min(missed, MAX_CATCH_UP)}. Returns 0 for one-shot
+     * tasks, tasks without misfire configuration, tasks that are not paused, and
+     * tasks without a recorded {@code pausedAt} (e.g. non-paused restored tasks —
+     * the restart gap is NOT compensated).
+     */
+    private int computeCatchUpCount(String taskName, ScheduledTaskEntry entry) {
+        MisfireConfig config = misfireConfigs.get(taskName);
+        if (config == null || entry.oneShot() || entry.pausedAt() == null) {
+            return 0;
+        }
+        if (!pausedTasks.contains(taskName)) {
+            return 0;
+        }
+        return switch (config.policy()) {
+            case SKIP -> 0;
+            case FIRE_ONCE -> 1;
+            case FIRE_IMMEDIATELY -> {
+                Duration gap = Duration.between(entry.pausedAt(), Instant.now());
+                yield gap.isNegative() ? 0 : Math.min(countMissedFirings(entry, gap), MAX_CATCH_UP);
+            }
+        };
+    }
+
+    /** Counts firings elapsed during {@code gap}: fixed tasks floor(gap/interval), cron by iteration. */
+    private int countMissedFirings(ScheduledTaskEntry entry, Duration gap) {
+        return switch (entry.taskType()) {
+            case "FIXED_DELAY", "FIXED_RATE" -> {
+                Duration interval = parseScheduleInterval(entry.schedule());
+                yield (interval == null || interval.isZero())
+                        ? 0
+                        : (int) (gap.toMillis() / interval.toMillis());
+            }
+            case "CRON" -> {
+                CronExpression cron = parseScheduleCron(entry.schedule());
+                if (cron == null) {
+                    yield 0;
+                }
+                ZoneId zone = parseScheduleZone(entry.schedule());
+                Instant end = Instant.now();
+                Instant cursor = entry.pausedAt();
+                int count = 0;
+                // Cap iteration slightly above MAX_CATCH_UP; exact totals beyond the cap are irrelevant.
+                while (count <= MAX_CATCH_UP) {
+                    ZonedDateTime nextZoned = cron.next(cursor.atZone(zone));
+                    if (nextZoned == null) {
+                        break;
+                    }
+                    Instant next = nextZoned.toInstant();
+                    if (next.isAfter(end)) {
+                        break;
+                    }
+                    count++;
+                    cursor = next;
+                }
+                yield count;
+            }
+            default -> 0;
+        };
+    }
+
+    /**
+     * Runs {@code count} catch-up executions serially on the scheduler thread through
+     * the full instrumented pipeline (lock, listeners, history, metrics). The burst
+     * aborts when the task is re-paused, cancelled, or replaced mid-flight.
+     */
+    private void scheduleCatchUp(String taskName, ScheduledTaskEntry identity, int count) {
+        Runnable wrapped = instrumentedRunnables.get(taskName);
+        ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler) this.getScheduler();
+        if (wrapped == null || scheduler == null) {
+            log.debug("Catch-up for task [{}] skipped: no instrumented runnable or scheduler", taskName);
+            return;
+        }
+        try {
+            scheduler.execute(() -> {
+                for (int i = 0; i < count; i++) {
+                    if (pausedTasks.contains(taskName)) {
+                        log.info("Catch-up for task [{}] aborted after {} of {} execution(s): task re-paused",
+                                taskName, i, count);
+                        return;
+                    }
+                    if (taskMap.get(taskName) != identity) {
+                        log.info("Catch-up for task [{}] aborted after {} of {} execution(s): task cancelled or replaced",
+                                taskName, i, count);
+                        return;
+                    }
+                    try {
+                        wrapped.run();
+                    } catch (Exception e) {
+                        log.warn("Catch-up execution {} of {} for task [{}] failed: {}",
+                                i + 1, count, taskName, e.getMessage());
+                        return;
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.warn("Catch-up for task [{}] rejected (scheduler likely shut down): {}", taskName, e.getMessage());
+        }
+    }
+
+    private MisfireConfig misfireConfigOrDefault(String taskName) {
+        MisfireConfig config = misfireConfigs.get(taskName);
+        return config != null ? config
+                : new MisfireConfig(TaskDefinition.DEFAULT_MISFIRE_POLICY, TaskDefinition.DEFAULT_MISFIRE_THRESHOLD);
+    }
+
+    /** Parses the interval (part before '/') from a fixed-task schedule string like "PT0.1S/PT0S". */
+    private static Duration parseScheduleInterval(String schedule) {
+        if (schedule == null) {
+            return null;
+        }
+        int slash = schedule.indexOf('/');
+        if (slash < 0) {
+            return null;
+        }
+        try {
+            return Duration.parse(schedule.substring(0, slash));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Extracts the cron expression from a cron schedule string ("expr" or "expr [zone]"). */
+    private static String parseScheduleCronString(String schedule) {
+        if (schedule == null) {
+            return null;
+        }
+        int bracket = schedule.lastIndexOf(" [");
+        String cron = (bracket > 0 && schedule.endsWith("]")) ? schedule.substring(0, bracket) : schedule;
+        return CronExpression.isValidExpression(cron) ? cron : null;
+    }
+
+    private static CronExpression parseScheduleCron(String schedule) {
+        String cron = parseScheduleCronString(schedule);
+        return cron != null ? CronExpression.parse(cron) : null;
+    }
+
+    private static ZoneId parseScheduleZone(String schedule) {
+        if (schedule != null) {
+            int bracket = schedule.lastIndexOf(" [");
+            if (bracket > 0 && schedule.endsWith("]")) {
+                try {
+                    return ZoneId.of(schedule.substring(bracket + 2, schedule.length() - 1));
+                } catch (Exception ignored) {
+                    // fall through to system default
+                }
+            }
+        }
+        return ZoneId.systemDefault();
+    }
+
+    /** Removes all misfire/tracking state for a task (cancel, expiry, one-shot completion, destroy). */
+    private void clearTaskTrackingState(String taskName) {
+        nextExpectedFire.remove(taskName);
+        misfireConfigs.remove(taskName);
+        instrumentedRunnables.remove(taskName);
+    }
+
+    private static ScheduledTaskEntry withPausedAt(ScheduledTaskEntry entry, Instant pausedAt) {
+        return new ScheduledTaskEntry(entry.cancelAction(), entry.taskType(), entry.schedule(),
+                entry.retryPolicy(), entry.oneShot(), entry.createdAt(), pausedAt);
+    }
+
     /**
      * Wraps a runnable with instrumentation (listeners + metrics).
      */
     private Runnable wrapRunnable(String taskName, Runnable delegate) {
-        return instrument(taskName, delegate);
+        Runnable instrumented = instrument(taskName, delegate);
+        instrumentedRunnables.put(taskName, instrumented);
+        return instrumented;
     }
 
     /**
      * Wraps a runnable with instrumentation and retry logic.
      */
     private Runnable wrapRunnable(String taskName, Runnable delegate, RetryPolicy retryPolicy) {
-        return withRetry(instrument(taskName, delegate), retryPolicy, taskName);
+        Runnable wrapped = withRetry(instrument(taskName, delegate), retryPolicy, taskName);
+        instrumentedRunnables.put(taskName, wrapped);
+        return wrapped;
     }
 
     /**
@@ -1283,10 +1712,21 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             String schedule,
             RetryPolicy retryPolicy,
             boolean oneShot,
-            Instant createdAt
+            Instant createdAt,
+            Instant pausedAt
     ) {
-        ScheduledTaskEntry(Runnable cancelAction, String taskType, String schedule) {
-            this(cancelAction, taskType, schedule, null, false, Instant.now());
+        /** Backward-compatible constructor: pausedAt defaults to null. */
+        public ScheduledTaskEntry(Runnable cancelAction, String taskType, String schedule,
+                                  RetryPolicy retryPolicy, boolean oneShot, Instant createdAt) {
+            this(cancelAction, taskType, schedule, retryPolicy, oneShot, createdAt, null);
         }
+
+        ScheduledTaskEntry(Runnable cancelAction, String taskType, String schedule) {
+            this(cancelAction, taskType, schedule, null, false, Instant.now(), null);
+        }
+    }
+
+    /** Internal immutable misfire configuration for a task. */
+    record MisfireConfig(MisfirePolicy policy, Duration threshold) {
     }
 }

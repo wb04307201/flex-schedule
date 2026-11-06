@@ -24,6 +24,22 @@ public interface MetricsRecorder {
      */
     void setActiveTaskCountSupplier(Supplier<Integer> supplier);
 
+    /**
+     * Records a misfire event: a recurring task's fire was late beyond its
+     * configured misfire threshold. Depending on the task's {@link MisfirePolicy}
+     * the execution was either skipped ({@link MisfirePolicy#SKIP}) or still
+     * carried out ({@link MisfirePolicy#FIRE_ONCE}, {@link MisfirePolicy#FIRE_IMMEDIATELY}).
+     * <p>
+     * Default no-op so existing implementations remain binary-compatible.
+     *
+     * @param taskName the task name
+     * @param taskType CRON, FIXED_DELAY, or FIXED_RATE
+     * @param policy   the misfire policy in effect for the task
+     */
+    default void recordMisfire(String taskName, String taskType, MisfirePolicy policy) {
+        // no-op by default (binary-compatible extension)
+    }
+
     /** No-op implementation used when Micrometer is not on the classpath. */
     MetricsRecorder NOOP = new MetricsRecorder() {
         @Override

@@ -138,6 +138,11 @@ public class TaskBuilder {
      * Sets the misfire policy for this task. Applies to recurring task types
      * only; one-shot tasks ignore it. Must not be null — leave unset to keep
      * the default {@link MisfirePolicy#FIRE_ONCE}.
+     * <p>
+     * {@link #register(Runnable)} applies the value to the registrar right after
+     * the task is scheduled, so late-fire detection and pause-gap catch-up take
+     * effect from the task's first judged fire onward.
+     * </p>
      */
     public TaskBuilder misfirePolicy(MisfirePolicy misfirePolicy) {
         Assert.notNull(misfirePolicy, "misfirePolicy must not be null");
@@ -148,6 +153,10 @@ public class TaskBuilder {
     /**
      * Sets the lateness threshold beyond which a trigger is considered a
      * misfire. Must not be null; leave unset to keep the default of 30 seconds.
+     * <p>
+     * Applied by {@link #register(Runnable)} right after scheduling (see
+     * {@link #misfirePolicy(MisfirePolicy)}).
+     * </p>
      */
     public TaskBuilder misfireThreshold(Duration misfireThreshold) {
         Assert.notNull(misfireThreshold, "misfireThreshold must not be null");
@@ -201,6 +210,13 @@ public class TaskBuilder {
         // taskMap so the entry actually exists for setCreatedAt to mutate.
         if (createdAt != null) {
             service.setCreatedAt(taskName, createdAt);
+        }
+
+        // Wire misfire settings into the registrar so runtime late-fire detection and
+        // resume catch-up can see them (same post-registration pattern as createdAt).
+        // ONE_SHOT tasks ignore the misfire policy entirely, so skip the wiring.
+        if (oneShotDelay == null) {
+            service.setMisfireConfig(taskName, misfirePolicy, misfireThreshold);
         }
     }
 }
