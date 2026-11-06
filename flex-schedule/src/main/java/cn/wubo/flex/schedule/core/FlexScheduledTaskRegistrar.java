@@ -219,6 +219,14 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
 
                 try {
+                    // A persisted-paused definition must not get a firing window: mark the
+                    // task paused BEFORE scheduling so instrument() skips even an immediate
+                    // first trigger (fixes the race where a restored paused task executed
+                    // once between scheduleByType and the post-scheduling pause()).
+                    if (def.paused()) {
+                        pausedTasks.add(def.taskName());
+                    }
+
                     ScheduledTask scheduledTask = scheduleByType(def, runnable);
                     ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel,
                             def.taskType(), describeSchedule(def), def.retryPolicy(), false, createdAt);
@@ -236,11 +244,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                              def.taskName(), def.taskType(), createdAt);
                 } catch (Exception e) {
                     taskMap.remove(def.taskName());
+                    pausedTasks.remove(def.taskName());
                     clearTaskTrackingState(def.taskName());
                     throw e;
                 }
 
                 if (def.paused()) {
+                    // Idempotent for set membership; records the entry-level pausedAt field.
                     pause(def.taskName());
                     // The pause started when the definition was last updated (typically
                     // before the restart), so a later resume() settles the gap from there.
