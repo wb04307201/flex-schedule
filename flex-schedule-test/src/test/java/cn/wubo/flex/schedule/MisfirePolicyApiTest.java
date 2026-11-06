@@ -186,4 +186,35 @@ class MisfirePolicyApiTest {
                 null, Duration.ofSeconds(1));
         assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
     }
+
+    // ─── 6. persistence carrier: null misfire fields (1.2.x JSON) get defaults ──
+
+    /**
+     * TaskDefinition is the documented persistence carrier: a definition serialized
+     * by 1.2.x carries neither misfire field, so Jackson (or any deserializer)
+     * passes null for BOTH. The canonical constructor must default them exactly
+     * like the 15-arg compat constructor instead of throwing — otherwise
+     * restoreTasks() silently skips every 1.2.x-persisted task.
+     */
+    @Test
+    void canonicalConstructor_nullMisfireFields_getsDefaults() {
+        Instant now = Instant.now();
+        TaskDefinition def = new TaskDefinition(
+                "t", "CRON", null, null, null, null, null, null, null,
+                "b", "m", List.of(), false, now, now,
+                null, null);
+        assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
+        assertEquals(Duration.ofSeconds(30), def.misfireThreshold());
+    }
+
+    @Test
+    void canonicalConstructor_nullThresholdWithExplicitPolicy_getsDefaultThreshold() {
+        Instant now = Instant.now();
+        TaskDefinition def = new TaskDefinition(
+                "t", "CRON", null, null, null, null, null, null, null,
+                "b", "m", List.of(), false, now, now,
+                MisfirePolicy.SKIP, null);
+        assertEquals(MisfirePolicy.SKIP, def.misfirePolicy());
+        assertEquals(TaskDefinition.DEFAULT_MISFIRE_THRESHOLD, def.misfireThreshold());
+    }
 }

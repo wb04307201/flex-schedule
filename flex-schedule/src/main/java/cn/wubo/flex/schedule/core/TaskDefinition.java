@@ -47,15 +47,20 @@ public record TaskDefinition(
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(30);
 
     /**
-     * Compact constructor normalizing the misfire fields:
-     * a {@code null} policy falls back to {@link #DEFAULT_MISFIRE_POLICY};
-     * the threshold must not be null and must be strictly positive.
+     * Compact constructor normalizing the misfire fields: a {@code null} policy
+     * falls back to {@link #DEFAULT_MISFIRE_POLICY} and a {@code null} threshold
+     * falls back to {@link #DEFAULT_MISFIRE_THRESHOLD} — 1.2.x-persisted payloads
+     * (e.g. JSON without either field, deserialized with nulls) must keep loading
+     * instead of failing the constructor and being skipped by restoreTasks().
+     * An explicitly supplied threshold must still be strictly positive.
      */
     public TaskDefinition {
         if (misfirePolicy == null) {
             misfirePolicy = DEFAULT_MISFIRE_POLICY;
         }
-        Assert.notNull(misfireThreshold, "misfireThreshold must not be null");
+        if (misfireThreshold == null) {
+            misfireThreshold = DEFAULT_MISFIRE_THRESHOLD;
+        }
         Assert.isTrue(misfireThreshold.compareTo(Duration.ZERO) > 0,
                 "misfireThreshold must be positive, was " + misfireThreshold);
     }
