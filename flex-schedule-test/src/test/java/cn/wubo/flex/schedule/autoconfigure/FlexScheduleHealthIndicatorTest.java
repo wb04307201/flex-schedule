@@ -110,4 +110,41 @@ class FlexScheduleHealthIndicatorTest {
         assertThat(health.getDetails()).containsKey("error");
         assertThat(health.getDetails().get("error").toString()).contains("boom");
     }
+
+    // ─── Task 6 scenario C13: edge branches ────────────────────────────
+
+    @Test
+    void nullScheduler_isUp_withUnavailableWarning_andNoPoolDetails() {
+        // Covers the `taskScheduler == null` defensive branch: the indicator must stay UP,
+        // emit the fixed "Task scheduler is not available" warning, and skip pool stats.
+        FlexScheduleHealthIndicator noScheduler = new FlexScheduleHealthIndicator(registrar, null);
+
+        Health health = noScheduler.health();
+
+        assertThat(health.getStatus()).isEqualTo(Status.UP);
+        assertThat(health.getDetails()).containsEntry("warning", "Task scheduler is not available");
+        assertThat(health.getDetails()).doesNotContainKeys("poolSize", "activeThreads", "completedExecutions");
+        // Task counts still reported from the registrar.
+        assertThat(health.getDetails()).containsEntry("totalTasks", 0);
+    }
+
+    @Test
+    void listedTaskWithEmptyDetail_isCountedActive_notPaused_andDoesNotThrow() {
+        // Covers the getTaskDetail(...).orElse(false) branch: a task visible through
+        // listTasks() whose detail lookup comes back empty (e.g. cancelled between the
+        // two reads) must be treated as NOT paused without an exception.
+        FlexScheduledTaskRegistrar ghostRegistrar = mock(FlexScheduledTaskRegistrar.class);
+        when(ghostRegistrar.listTasks())
+            .thenReturn(java.util.List.of(new cn.wubo.flex.schedule.core.TaskInfo("ghost", "FIXED_DELAY", "PT1M")));
+        when(ghostRegistrar.getTaskDetail("ghost")).thenReturn(java.util.Optional.empty());
+
+        FlexScheduleHealthIndicator indicator = new FlexScheduleHealthIndicator(ghostRegistrar, scheduler);
+
+        Health health = indicator.health();
+
+        assertThat(health.getStatus()).isEqualTo(Status.UP);
+        assertThat(health.getDetails()).containsEntry("totalTasks", 1);
+        assertThat(health.getDetails()).containsEntry("pausedTasks", 0L);
+        assertThat(health.getDetails()).containsEntry("activeTasks", 1L);
+    }
 }
