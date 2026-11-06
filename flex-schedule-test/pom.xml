@@ -34,6 +34,16 @@
             <artifactId>spring-boot-starter-webmvc</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>io.github.wb04307201</groupId>
+            <artifactId>flex-schedule-redis</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
 </project>
