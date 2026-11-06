@@ -41,17 +41,17 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      * <p>
      * Expected-fire model (chosen for determinism):
      * <ul>
-     *   <li>FIXED_DELAY: start-based cadence — after each judged fire, expected = fireStart + interval.</li>
+     *   <li>FIXED_DELAY: completion-based cadence — after each fire (executed, misfire-skipped,
+     *       or lock-denied), expected = completion + interval, matching Spring's fixed-delay
+     *       contract so delegate runtime never counts as lateness.</li>
      *   <li>FIXED_RATE: grid-based — expected advances by interval until strictly after the actual start.</li>
      *   <li>CRON: expected = next {@link CronExpression} boundary after the actual start (task timezone).</li>
      * </ul>
      * The first fire after registration, {@link #setMisfireConfig}, or {@link #resume}
      * only seeds the baseline and is never itself judged (the tracker holds no entry).
      * Consequences, all deliberate and deterministic: paused fires do not advance the
-     * tracker (the pause gap is settled by resume() catch-up instead); the restart gap
-     * of restored, non-paused tasks is NOT compensated; and for FIXED_DELAY a delegate
-     * whose own runtime exceeds the threshold registers as lateness on the next fire
-     * (start-based cadence limitation).
+     * tracker (the pause gap is settled by resume() catch-up instead); and the restart
+     * gap of restored, non-paused tasks is NOT compensated.
      */
     private final Map<String, Instant> nextExpectedFire = new ConcurrentHashMap<>();
     /** Outermost wrapped (instrumented, retry-aware) runnable per task, replayed serially for resume catch-up. */
@@ -1221,6 +1221,9 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             // never takes the distributed lock). SKIP returns without executing;
             // FIRE_ONCE/FIRE_IMMEDIATELY fall through and execute as normal.
             if (handleMisfire(taskName, Instant.now())) {
+                // The skipped fire "completes" now: rebase the FIXED_DELAY baseline
+                // so the next fire is judged against completion + interval.
+                rebaseFixedDelayOnCompletion(taskName);
                 return;
             }
 
@@ -1228,6 +1231,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             Duration lockDuration = resolveLockDuration(entry);
             if (!distributedLock.tryLock(taskName, lockDuration)) {
                 log.debug("Task [{}] could not acquire distributed lock, skipping execution", taskName);
+                // Lock-denied fires also "complete" immediately (see above).
+                rebaseFixedDelayOnCompletion(taskName);
                 return;
             }
 
@@ -1303,6 +1308,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
                 throw e;
             } finally {
+                // Completion-based FIXED_DELAY baseline: expected = completion + interval,
+                // matching Spring's fixed-delay contract so delegate runtime never counts
+                // as lateness on the next fire. Covers success AND exception exits.
+                rebaseFixedDelayOnCompletion(taskName);
                 distributedLock.unlock(taskName);
             }
         };
@@ -1467,16 +1476,25 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     }
 
     /**
-     * Advances the expected-fire tracker for the next cadence step from {@code actualStart}:
-     * FIXED_DELAY start-based ({@code actualStart + interval}), FIXED_RATE grid-based
-     * (advance by interval until strictly after {@code actualStart}), CRON next boundary.
+     * Advances the expected-fire tracker at fire start: FIXED_RATE grid-based
+     * (advance by interval until strictly after {@code actualStart}), CRON next
+     * boundary after {@code actualStart}. FIXED_DELAY is completion-based and only
+     * seeded here when no baseline exists (see {@link #rebaseFixedDelayOnCompletion}).
      */
     private void advanceExpectedFire(String taskName, ScheduledTaskEntry entry, Instant actualStart) {
         switch (entry.taskType()) {
             case "FIXED_DELAY" -> {
-                Duration interval = parseScheduleInterval(entry.schedule());
-                if (interval != null) {
-                    nextExpectedFire.put(taskName, actualStart.plus(interval));
+                // Completion-based cadence (matches Spring's fixed-delay contract: the
+                // next fire is scheduled at completion + interval). The baseline is
+                // rebased from the completion instant on every fire exit path
+                // (rebaseFixedDelayOnCompletion), so delegate runtime never counts as
+                // lateness. Here we only seed when no baseline exists yet; the seed is
+                // superseded by this fire's completion rebase.
+                if (!nextExpectedFire.containsKey(taskName)) {
+                    Duration interval = parseScheduleInterval(entry.schedule());
+                    if (interval != null) {
+                        nextExpectedFire.put(taskName, actualStart.plus(interval));
+                    }
                 }
             }
             case "FIXED_RATE" -> {
@@ -1502,6 +1520,30 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 }
             }
             default -> { /* ONE_SHOT and unknown types are not tracked */ }
+        }
+    }
+
+    /**
+     * Rebases the FIXED_DELAY expected-fire baseline from the completion instant
+     * ({@code completion + interval}), matching Spring's fixed-delay contract where
+     * the next fire is scheduled after the previous execution completes. Called on
+     * every post-detection exit path of a fire — executed (delegate finally),
+     * misfire-skipped, and lock-denied (the latter two "complete" immediately) — so
+     * an on-schedule fire whose delegate runs longer than the misfire threshold is
+     * never judged as late. No-op for unconfigured tasks and non-FIXED_DELAY types;
+     * FIXED_RATE/CRON advance at fire start instead.
+     */
+    private void rebaseFixedDelayOnCompletion(String taskName) {
+        if (!misfireConfigs.containsKey(taskName)) {
+            return;
+        }
+        ScheduledTaskEntry entry = taskMap.get(taskName);
+        if (entry == null || !"FIXED_DELAY".equals(entry.taskType())) {
+            return;
+        }
+        Duration interval = parseScheduleInterval(entry.schedule());
+        if (interval != null) {
+            nextExpectedFire.put(taskName, Instant.now().plus(interval));
         }
     }
 

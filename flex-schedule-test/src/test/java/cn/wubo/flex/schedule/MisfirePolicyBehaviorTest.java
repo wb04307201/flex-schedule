@@ -318,6 +318,47 @@ class MisfirePolicyBehaviorTest {
                 "SKIP decision must leave a MISFIRE_SKIPPED history record");
     }
 
+    // ─── 4b. FIXED_DELAY: delegate runtime must not count as lateness ──
+
+    @Test
+    void fixedDelay_delegateLongerThanThreshold_onScheduleFires_notMisfire() throws Exception {
+        // Fixed-delay contract: next fire = completion + interval. A delegate that
+        // runs LONGER than the misfire threshold but fires exactly on schedule must
+        // never be judged as late (regression guard for the start-based baseline,
+        // which counted delegate runtime as lateness and caused false SKIPs /
+        // permanent FIRE_ONCE warnings).
+        StubRecorder recorder = new StubRecorder();
+        FlexScheduledTaskRegistrar r = newRegistrar(2, "misfire-slow-delegate-", recorder);
+        DefaultFlexScheduledTaskService service = new DefaultFlexScheduledTaskService(r);
+        AtomicInteger counter = new AtomicInteger();
+
+        service.task("slowDelegate")
+                .fixedDelay(Duration.ofMillis(100), Duration.ZERO)
+                .misfirePolicy(MisfirePolicy.SKIP)          // strictest policy: a false
+                .misfireThreshold(Duration.ofMillis(50))    // misfire would SKIP fires
+                .register(() -> {
+                    counter.incrementAndGet();
+                    sleep(150); // delegate runtime > threshold
+                });
+
+        // Each cycle takes ~250ms (150ms delegate + 100ms delay); wait for >= 4 fires.
+        awaitTrue(() -> counter.get() >= 4, 10_000,
+                "on-schedule fires must keep executing despite a slow delegate");
+        // Freeze the cadence, then wait longer than one delegate runtime so any
+        // in-flight execution completes and its success record lands in history.
+        r.pause("slowDelegate");
+        Thread.sleep(300);
+
+        assertTrue(recorder.misfires.isEmpty(),
+                "no misfire may be recorded for on-schedule fixed-delay fires, got " + recorder.misfires);
+        assertFalse(hasMisfireSkip(r, "slowDelegate"),
+                "SKIP must not fire: delegate runtime is not lateness");
+        assertEquals(0, failedCount(r, "slowDelegate"));
+        assertEquals(counter.get(), successCount(r, "slowDelegate"),
+                "every fire should be recorded as a success");
+        assertTrue(counter.get() >= 4, "execution count must grow normally, got " + counter.get());
+    }
+
     // ─── 5. resume + SKIP: no catch-up ────────────────────────────────
 
     @Test
