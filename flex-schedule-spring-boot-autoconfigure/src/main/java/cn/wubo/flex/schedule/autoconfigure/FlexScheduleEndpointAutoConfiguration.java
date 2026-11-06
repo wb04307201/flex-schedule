@@ -21,8 +21,14 @@ import org.springframework.context.annotation.Configuration;
  * an {@code @AutoConfiguration} class — each fragment must be its own
  * top-level {@code @AutoConfiguration} registered in
  * {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}.
+ * <p>
+ * Declared {@code after} {@link FlexScheduleAutoConfiguration} so that the
+ * {@link ConditionalOnBean} condition below evaluates against an
+ * already-registered {@link FlexScheduledTaskService} definition. Without it
+ * the fragment would activate only because {@code FlexScheduleAutoConfiguration}
+ * happens to sort alphabetically first — pure registration-order luck.
  */
-@AutoConfiguration
+@AutoConfiguration(after = FlexScheduleAutoConfiguration.class)
 @ConditionalOnClass(Endpoint.class)
 @ConditionalOnBean(FlexScheduledTaskService.class)
 public class FlexScheduleEndpointAutoConfiguration {

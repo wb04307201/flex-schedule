@@ -24,9 +24,13 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  * <p>
  * Split from {@link FlexScheduleAutoConfiguration} for the same Boot 4
  * nested-class-discovery change documented in
- * {@link FlexScheduleEndpointAutoConfiguration}.
+ * {@link FlexScheduleEndpointAutoConfiguration}. Declared {@code after}
+ * {@link FlexScheduleAutoConfiguration} so that the {@link ConditionalOnBean}
+ * condition below evaluates against already-registered registrar / scheduler
+ * bean definitions, instead of relying on the two classes happening to sort
+ * alphabetically in the right order.
  */
-@AutoConfiguration
+@AutoConfiguration(after = FlexScheduleAutoConfiguration.class)
 @ConditionalOnClass(HealthIndicator.class)
 @ConditionalOnBean({FlexScheduledTaskRegistrar.class, ThreadPoolTaskScheduler.class})
 public class FlexScheduleHealthAutoConfiguration {

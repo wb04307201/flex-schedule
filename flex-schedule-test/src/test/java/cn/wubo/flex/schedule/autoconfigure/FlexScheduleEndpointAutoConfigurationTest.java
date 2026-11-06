@@ -6,6 +6,7 @@ import cn.wubo.flex.schedule.autoconfigure.endpoint.FlexScheduleEndpoint;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
@@ -89,6 +90,18 @@ class FlexScheduleEndpointAutoConfigurationTest {
             assertThat(ctx).hasSingleBean(FlexScheduleEndpoint.class);
             assertThat(ctx.getBean(FlexScheduleEndpoint.class)).isSameAs(UserEndpointConfig.ENDPOINT);
         });
+    }
+
+    @Test
+    void endpointAutoConfiguration_declaresOrderingAfterCoreAutoConfiguration() {
+        // @ConditionalOnBean(FlexScheduledTaskService.class) only sees the service
+        // bean definition if the core auto-configuration is processed first; guard
+        // the explicit after= declaration instead of relying on alphabetical luck
+        // (same rationale as FlexScheduleRedisLockAutoConfigurationTest).
+        AutoConfiguration annotation = FlexScheduleEndpointAutoConfiguration.class
+            .getAnnotation(AutoConfiguration.class);
+        assertThat(annotation).isNotNull();
+        assertThat(annotation.after()).contains(FlexScheduleAutoConfiguration.class);
     }
 
     // ─── C1/C3: property chain lands in DefaultEndpointAccessControl ───

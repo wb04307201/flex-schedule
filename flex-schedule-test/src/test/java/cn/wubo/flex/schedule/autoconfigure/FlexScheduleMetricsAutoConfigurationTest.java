@@ -8,6 +8,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.micrometer.metrics.autoconfigure.MetricsAutoConfiguration;
 import org.springframework.boot.micrometer.metrics.autoconfigure.export.simple.SimpleMetricsExportAutoConfiguration;
@@ -109,6 +110,21 @@ class FlexScheduleMetricsAutoConfigurationTest {
                     .isSameAs(ctx.getBean(MeterRegistry.class));
                 assertThat(ctx).hasSingleBean(FlexScheduleMetricsRegistrar.class);
             });
+    }
+
+    @Test
+    void metricsAutoConfiguration_declaresOrderingAfterCoreAutoConfiguration() {
+        // The bean-level @ConditionalOnBean({FlexScheduledTaskRegistrar, MetricsRecorder})
+        // on flexScheduleMetricsRegistrar only sees the registrar definition if the core
+        // auto-configuration is processed first; guard the explicit after= declaration
+        // instead of relying on alphabetical luck (same rationale as
+        // FlexScheduleRedisLockAutoConfigurationTest). The MeterRegistry itself must
+        // remain late-bound — ordering after the CORE fragment says nothing about
+        // Boot's metrics auto-configurations.
+        AutoConfiguration annotation = FlexScheduleMetricsAutoConfiguration.class
+            .getAnnotation(AutoConfiguration.class);
+        assertThat(annotation).isNotNull();
+        assertThat(annotation.after()).contains(FlexScheduleAutoConfiguration.class);
     }
 
     @Test

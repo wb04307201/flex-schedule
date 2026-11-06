@@ -3,6 +3,7 @@ package cn.wubo.flex.schedule.autoconfigure;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
@@ -58,6 +59,18 @@ class FlexScheduleHealthAutoConfigurationTest {
                 assertThat(ctx).hasNotFailed();
                 assertThat(ctx).doesNotHaveBean(FlexScheduleHealthIndicator.class);
             });
+    }
+
+    @Test
+    void healthAutoConfiguration_declaresOrderingAfterCoreAutoConfiguration() {
+        // The class-level @ConditionalOnBean only sees registrar/scheduler bean
+        // definitions if the core auto-configuration is processed first; guard the
+        // explicit after= declaration instead of relying on alphabetical luck
+        // (same rationale as FlexScheduleRedisLockAutoConfigurationTest).
+        AutoConfiguration annotation = FlexScheduleHealthAutoConfiguration.class
+            .getAnnotation(AutoConfiguration.class);
+        assertThat(annotation).isNotNull();
+        assertThat(annotation.after()).contains(FlexScheduleAutoConfiguration.class);
     }
 
     @Test
