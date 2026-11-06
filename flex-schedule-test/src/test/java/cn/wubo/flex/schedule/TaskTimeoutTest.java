@@ -74,6 +74,34 @@ class TaskTimeoutTest {
         assertEquals("task error", ex.getMessage());
     }
 
+    // ─── A10: checked exception from delegate is wrapped, cause preserved ──
+
+    /**
+     * A Runnable cannot declare checked exceptions, so the delegate throws one via the
+     * standard sneaky-throw trick. {@code executor.submit(...)} surfaces it as an
+     * {@code ExecutionException}; TimeoutRunnable must then wrap it in a plain
+     * RuntimeException carrying the original as {@code getCause()}.
+     */
+    @Test
+    void timeoutRunnable_checkedExceptionFromDelegate_wrappedInRuntimeExceptionWithOriginalCause() {
+        final Exception checkedBoom = new Exception("checked-boom");
+        TimeoutRunnable runnable = new TimeoutRunnable("checked", () -> sneakyThrow(checkedBoom),
+                Duration.ofSeconds(5));
+
+        RuntimeException ex = assertThrows(RuntimeException.class, runnable::run);
+        // Not the timeout wrapper, not the RuntimeException passthrough path —
+        // the checked-exception branch produces a plain RuntimeException(cause).
+        assertEquals(RuntimeException.class, ex.getClass(),
+                "checked exceptions must be wrapped in a plain RuntimeException");
+        assertSame(checkedBoom, ex.getCause(),
+                "getCause() must be the original checked exception thrown by the delegate");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> void sneakyThrow(Throwable t) throws T {
+        throw (T) t;
+    }
+
     @Test
     void addCronTask_withTimeout_shouldRegister() {
         registrar.addCronTask("timeoutCron", "* * * * * *", Duration.ofSeconds(5), () -> {});

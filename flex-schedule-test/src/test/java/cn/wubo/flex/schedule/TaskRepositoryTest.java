@@ -103,6 +103,44 @@ class TaskRepositoryTest {
     }
 
     @Test
+    void taskDefinition_builder_timezoneAndDelay_passThrough() {
+        java.time.ZoneId zone = java.time.ZoneId.of("Asia/Shanghai");
+        TaskDefinition cronDef = TaskDefinition.builder("tzTask", "CRON")
+                .cronExpression("0 0 * * * *")
+                .timezone(zone)
+                .build();
+        assertEquals(zone, cronDef.timezone(), "timezone(ZoneId) setter must pass through to the definition");
+
+        TaskDefinition oneShotDef = TaskDefinition.builder("osTask", "ONE_SHOT")
+                .delay(Duration.ofSeconds(7))
+                .build();
+        assertEquals(Duration.ofSeconds(7), oneShotDef.delay(),
+                "one-shot delay(...) setter must pass through to the definition");
+
+        // Fluent contract: setters return the same builder instance.
+        TaskDefinition.Builder builder = TaskDefinition.builder("fluent", "CRON");
+        assertSame(builder, builder.timezone(zone));
+        assertSame(builder, builder.delay(Duration.ofSeconds(1)));
+    }
+
+    @Test
+    void taskDefinition_builder_freshInstance_defaultsCreatedAtToNow() {
+        Instant before = Instant.now();
+        TaskDefinition def = TaskDefinition.builder("fresh", "CRON").cronExpression("0 * * * * *").build();
+        Instant after = Instant.now();
+
+        assertNotNull(def.createdAt());
+        // Plan tolerance: +/-5s around the construction window.
+        assertTrue(!def.createdAt().isBefore(before.minusSeconds(5))
+                        && !def.createdAt().isAfter(after.plusSeconds(5)),
+                "fresh builder createdAt must be ~now (±5s), was " + def.createdAt());
+        assertNotNull(def.updatedAt());
+        assertTrue(!def.updatedAt().isBefore(before.minusSeconds(5))
+                        && !def.updatedAt().isAfter(after.plusSeconds(5)),
+                "fresh builder updatedAt must be ~now (±5s), was " + def.updatedAt());
+    }
+
+    @Test
     void taskRepository_null_fallsBackToInMemory() {
         org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler scheduler =
                 new org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler();

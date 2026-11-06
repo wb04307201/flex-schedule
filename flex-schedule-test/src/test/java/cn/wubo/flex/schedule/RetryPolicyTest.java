@@ -68,6 +68,18 @@ class RetryPolicyTest {
         assertEquals(Backoff.EXPONENTIAL, policy.backoff());
     }
 
+    // ─── A14: exponential() two-arg default maxDelay ───────────────────
+
+    @Test
+    void exponential_withoutExplicitMaxDelay_defaultsToOneHour() {
+        RetryPolicy policy = RetryPolicy.exponential(3, Duration.ofSeconds(1));
+        assertEquals(Duration.ofHours(1), policy.maxDelay(),
+                "the two-arg exponential factory must apply the 1h DEFAULT_MAX_DELAY cap");
+        assertEquals(RetryPolicy.DEFAULT_MAX_DELAY, policy.maxDelay());
+        // The cap is inherited by computeDelay: nothing below 1h is clipped.
+        assertEquals(Duration.ofSeconds(4), policy.computeDelay(3));
+    }
+
     // ─── computeDelay ────────────────────────────────────────────────
 
     @Test

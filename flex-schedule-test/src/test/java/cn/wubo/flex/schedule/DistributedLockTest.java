@@ -238,4 +238,93 @@ class DistributedLockTest {
         registrar.setDistributedLock(null);
         assertEquals(DistributedLock.NOOP, registrar.getDistributedLock());
     }
+
+    // ─── A17: resolveLockDuration values observed through tryLock ─────
+
+    /**
+     * Lock stub recording the Duration handed to the FIRST tryLock call per task,
+     * with a latch so tests wait for real fires instead of sleeping a fixed guess.
+     */
+    private static final class CapturingLock implements DistributedLock {
+        private final java.util.concurrent.ConcurrentHashMap<String, Duration> durations =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        private final java.util.concurrent.ConcurrentHashMap<String, CountDownLatch> latches =
+                new java.util.concurrent.ConcurrentHashMap<>();
+
+        void expect(String taskName) {
+            latches.put(taskName, new CountDownLatch(1));
+        }
+
+        Duration awaitDuration(String taskName, long timeoutMs) throws InterruptedException {
+            CountDownLatch latch = latches.get(taskName);
+            assertNotNull(latch, "no capture expectation registered for " + taskName);
+            assertTrue(latch.await(timeoutMs, TimeUnit.MILLISECONDS),
+                    "tryLock for task [" + taskName + "] was not observed within " + timeoutMs + "ms");
+            assertTrue(durations.containsKey(taskName));
+            return durations.get(taskName);
+        }
+
+        @Override
+        public boolean tryLock(String taskName, Duration lockDuration) {
+            // First capture wins; later fires of the same task must not overwrite it.
+            durations.putIfAbsent(taskName, lockDuration);
+            CountDownLatch latch = latches.get(taskName);
+            if (latch != null) {
+                latch.countDown();
+            }
+            return true;
+        }
+
+        @Override
+        public void unlock(String taskName) {}
+    }
+
+    @Test
+    void fixedRateTask_lockDurationEqualsInterval() throws InterruptedException {
+        CapturingLock lock = new CapturingLock();
+        lock.expect("lockRate500");
+        registrar.setDistributedLock(lock);
+
+        registrar.addFixedRateTask("lockRate500", Duration.ofMillis(500), Duration.ZERO, () -> { });
+
+        // Schedule string "PT0.5S/PT0S" is parsed exactly by resolveLockDuration.
+        assertEquals(Duration.ofMillis(500), lock.awaitDuration("lockRate500", 5000),
+                "fixed-rate lock duration must equal the task interval");
+    }
+
+    @Test
+    void fixedDelayTask_lockDurationEqualsInterval() throws InterruptedException {
+        CapturingLock lock = new CapturingLock();
+        lock.expect("lockDelay500");
+        registrar.setDistributedLock(lock);
+
+        registrar.addFixedDelayTask("lockDelay500", Duration.ofMillis(500), Duration.ZERO, () -> { });
+
+        assertEquals(Duration.ofMillis(500), lock.awaitDuration("lockDelay500", 5000),
+                "fixed-delay lock duration must equal the task interval");
+    }
+
+    @Test
+    void cronTask_lockDurationDefaultsTo30Seconds() throws InterruptedException {
+        CapturingLock lock = new CapturingLock();
+        lock.expect("lockCron");
+        registrar.setDistributedLock(lock);
+
+        registrar.addCronTask("lockCron", "* * * * * *", () -> { });
+
+        assertEquals(Duration.ofSeconds(30), lock.awaitDuration("lockCron", 5000),
+                "cron tasks must default to the 30s lock duration");
+    }
+
+    @Test
+    void oneShotTask_lockDurationDefaultsTo30Seconds() throws InterruptedException {
+        CapturingLock lock = new CapturingLock();
+        lock.expect("lockOneShot");
+        registrar.setDistributedLock(lock);
+
+        registrar.schedule("lockOneShot", Duration.ofMillis(100), () -> { });
+
+        assertEquals(Duration.ofSeconds(30), lock.awaitDuration("lockOneShot", 5000),
+                "one-shot tasks must default to the 30s lock duration");
+    }
 }
