@@ -9,9 +9,12 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.micrometer.metrics.autoconfigure.MetricsAutoConfiguration;
+import org.springframework.boot.micrometer.metrics.autoconfigure.export.simple.SimpleMetricsExportAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
@@ -21,9 +24,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Conditional-wiring tests for {@link FlexScheduleMetricsAutoConfiguration}
- * (Task 6 scenario C4): the Micrometer recorder + wiring bean appear only when
- * a {@link MeterRegistry} bean is present, and a user-supplied
- * {@link MetricsRecorder} replaces the default.
+ * (Task 6 scenario C4, plus the fix-round-1 late-binding regression): the Micrometer
+ * recorder + wiring bean activate for any MeterRegistry source — a user bean or
+ * Boot's own auto-configured registry — and stay inert (NOOP) when no registry
+ * exists. A user-supplied {@link MetricsRecorder} replaces the default.
  */
 class FlexScheduleMetricsAutoConfigurationTest {
 
@@ -62,15 +66,49 @@ class FlexScheduleMetricsAutoConfigurationTest {
 
     @Test
     void withoutMeterRegistryBean_nothingIsCreated() {
-        // @ConditionalOnBean(MeterRegistry.class) — classpath has the Micrometer classes
-        // (the @ConditionalOnClass passes) but no registry bean exists.
+        // Late binding (fix round 1): with no MeterRegistry definition anywhere, the
+        // recorder must NOT activate — the default MetricsRecorder bean degrades to the
+        // NOOP singleton, so no Micrometer meters are ever registered and the registrar
+        // keeps its default NOOP behavior end-to-end.
         runner.run(ctx -> {
             assertThat(ctx).hasNotFailed();
             assertThat(ctx).doesNotHaveBean(MicrometerMetricsRecorder.class);
-            assertThat(ctx).doesNotHaveBean(FlexScheduleMetricsRegistrar.class);
-            // Registrar keeps its NOOP recorder: still functional, nothing wired.
+            assertThat(ctx.getBean(MetricsRecorder.class)).isSameAs(MetricsRecorder.NOOP);
+            // Registrar still fully functional.
             assertThat(ctx.getBean(FlexScheduledTaskRegistrar.class)).isNotNull();
         });
+    }
+
+    @Test
+    void withBootAutoConfiguredRegistry_lateBindingActivatesMetrics() {
+        // Fix-round-1 regression. In a standard actuator app the MeterRegistry comes from
+        // Boot's SimpleMetricsExportAutoConfiguration, whose bean definitions are registered
+        // AFTER the cn.wubo fragments are condition-evaluated (auto-config sort is
+        // alphabetical: "cn.wubo..." < "org.springframework..."). A class-level
+        // @ConditionalOnBean(MeterRegistry.class) therefore never matched and metrics
+        // silently stayed off. The fragment must bind the registry late — via ObjectProvider
+        // resolution at bean-instantiation time, when every definition (user or Boot) is
+        // already registered — with NO user-supplied registry in the context.
+        new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(
+                FlexScheduleAutoConfiguration.class,
+                FlexScheduleMetricsAutoConfiguration.class,
+                // Boot's own metrics auto-configs — these are what a default actuator app
+                // uses to produce its MeterRegistry; no user MeterRegistryConfig here.
+                MetricsAutoConfiguration.class,
+                SimpleMetricsExportAutoConfiguration.class))
+            .run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(ctx).hasSingleBean(MeterRegistry.class);
+                assertThat(ctx.getBean(MeterRegistry.class)).isInstanceOf(SimpleMeterRegistry.class);
+                assertThat(ctx).hasSingleBean(MetricsRecorder.class);
+                MetricsRecorder recorder = ctx.getBean(MetricsRecorder.class);
+                assertThat(recorder).isInstanceOf(MicrometerMetricsRecorder.class);
+                // Bound to exactly Boot's auto-configured registry.
+                assertThat(ReflectionTestUtils.getField(recorder, "meterRegistry"))
+                    .isSameAs(ctx.getBean(MeterRegistry.class));
+                assertThat(ctx).hasSingleBean(FlexScheduleMetricsRegistrar.class);
+            });
     }
 
     @Test

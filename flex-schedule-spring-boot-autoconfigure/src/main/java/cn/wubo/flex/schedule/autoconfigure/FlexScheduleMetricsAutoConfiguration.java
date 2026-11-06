@@ -4,6 +4,8 @@ import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.metrics.MicrometerMetricsRecorder;
 import io.micrometer.core.instrument.MeterRegistry;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -20,24 +22,43 @@ import org.springframework.context.annotation.Bean;
  * nested-class-discovery change documented in
  * {@link FlexScheduleEndpointAutoConfiguration}.
  * <p>
- * <strong>Why the explicit kill-switch condition:</strong> unlike the endpoint,
- * health and redis-lock fragments — which back off transitively because their
- * class-level {@code @ConditionalOnBean} targets core flex-schedule beans that
- * disappear when {@code flex.schedule.enabled=false} — the
- * {@code flexScheduleMetricsRecorder} bean only depends on a user-supplied
- * {@link MeterRegistry}. Without the property guard below, disabling the library
- * still left a stray {@code MetricsRecorder} bean behind (bug exposed by the
- * 1.3.0 auto-configuration test sweep, scenario C8).
+ * <strong>Late binding by design (fix round 1):</strong> this fragment used to carry
+ * a class-level {@code @ConditionalOnBean(MeterRegistry.class)}. Auto-configuration
+ * conditions are evaluated while bean <em>definitions</em> are being registered and
+ * only against definitions registered <em>so far</em>; since {@code cn.wubo...} sorts
+ * alphabetically before {@code org.springframework...}, Boot's own metrics auto-
+ * configurations ({@code MetricsAutoConfiguration}, the Simple/Prometheus/OTLP
+ * exporters, the composite) had not registered their {@link MeterRegistry} yet when
+ * the condition ran — so in a default actuator application the fragment silently
+ * never activated. Replacing the eager injection with an
+ * {@link ObjectProvider}{@code <MeterRegistry>} resolved at bean-creation time makes
+ * the lookup order-insensitive: by then every auto-configuration has contributed its
+ * definitions and the provider finds a user-supplied registry, an exporter registry,
+ * or the {@code @Primary} composite exactly like direct injection would. An
+ * {@code @AutoConfiguration(afterName = ...)} chain was rejected because it would
+ * have to enumerate every exporter class (and their FQNs move across Boot versions).
+ * <p>
+ * The {@code flex.schedule.enabled} kill switch is honored through
+ * {@link ConditionalOnProperty} (scenario C8): when the library is disabled no bean
+ * of this fragment is installed at all. When the library is enabled but no
+ * {@link MeterRegistry} ever becomes available, the default recorder degrades to
+ * {@link MetricsRecorder#NOOP} — metrics stay off, exactly as before.
  */
+@Slf4j
 @AutoConfiguration
 @ConditionalOnClass(MeterRegistry.class)
-@ConditionalOnBean(MeterRegistry.class)
 @ConditionalOnProperty(prefix = "flex.schedule", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class FlexScheduleMetricsAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(MetricsRecorder.class)
-    public MetricsRecorder flexScheduleMetricsRecorder(MeterRegistry meterRegistry) {
+    public MetricsRecorder flexScheduleMetricsRecorder(ObjectProvider<MeterRegistry> meterRegistryProvider) {
+        MeterRegistry meterRegistry = meterRegistryProvider.getIfAvailable();
+        if (meterRegistry == null) {
+            log.info("Flex schedule metrics stay inactive — no MeterRegistry bean is available");
+            return MetricsRecorder.NOOP;
+        }
+        log.info("Flex schedule installing MicrometerMetricsRecorder against {}", meterRegistry.getClass().getSimpleName());
         return new MicrometerMetricsRecorder(meterRegistry);
     }
 
