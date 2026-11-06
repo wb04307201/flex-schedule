@@ -1,5 +1,7 @@
 package cn.wubo.flex.schedule.core;
 
+import org.springframework.util.Assert;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -30,6 +32,8 @@ public class TaskBuilder {
     private Duration initialDelay = Duration.ZERO;
     private Duration oneShotDelay;
     private Instant createdAt;
+    private MisfirePolicy misfirePolicy = TaskDefinition.DEFAULT_MISFIRE_POLICY;
+    private Duration misfireThreshold = TaskDefinition.DEFAULT_MISFIRE_THRESHOLD;
 
     TaskBuilder(FlexScheduledTaskService service, String taskName) {
         this.service = service;
@@ -127,6 +131,27 @@ public class TaskBuilder {
      */
     public TaskBuilder createdAt(Instant createdAt) {
         this.createdAt = createdAt;
+        return this;
+    }
+
+    /**
+     * Sets the misfire policy for this task. Applies to recurring task types
+     * only; one-shot tasks ignore it. Must not be null — leave unset to keep
+     * the default {@link MisfirePolicy#FIRE_ONCE}.
+     */
+    public TaskBuilder misfirePolicy(MisfirePolicy misfirePolicy) {
+        Assert.notNull(misfirePolicy, "misfirePolicy must not be null");
+        this.misfirePolicy = misfirePolicy;
+        return this;
+    }
+
+    /**
+     * Sets the lateness threshold beyond which a trigger is considered a
+     * misfire. Must not be null; leave unset to keep the default of 30 seconds.
+     */
+    public TaskBuilder misfireThreshold(Duration misfireThreshold) {
+        Assert.notNull(misfireThreshold, "misfireThreshold must not be null");
+        this.misfireThreshold = misfireThreshold;
         return this;
     }
 
