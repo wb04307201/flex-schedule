@@ -21,6 +21,7 @@
 - **Timezone support** — Cron tasks with custom timezone (`addCronTask(name, cron, ZoneId, runnable)`)
 - **One-shot tasks** — Delayed single-execution with auto-removal
 - **Retry on failure** — Fixed or exponential backoff with configurable max delay
+- **Misfire handling** — Opt-in late-fire detection and pause-gap catch-up per task via `MisfirePolicy` (SKIP / FIRE_ONCE / FIRE_IMMEDIATELY)
 - **Execution timeout** — Automatically interrupt tasks that exceed their time limit
 - **Task dependency chains** — Sequential task execution with `TaskChain` builder
 - **Execution history** — In-memory ring buffer of execution records per task
@@ -143,7 +144,9 @@ record TaskInfo(String taskName, String taskType, String schedule) {}
 
 record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
-                  boolean paused) {}
+                  boolean paused, MisfirePolicy misfirePolicy,
+                  Duration misfireThreshold) {}
+// misfirePolicy / misfireThreshold: null when misfire handling is not configured
 ```
 
 ### Fluent Task Builder
@@ -156,7 +159,7 @@ taskService.task("cleanup")
     .register(this::cleanup);
 ```
 
-Choose exactly one scheduling type with `cron`, `fixedDelay`, `fixedRate`, or `oneShot`. Options such as `timezone`, `timeout`, `retry`, and `createdAt` can be composed where applicable.
+Choose exactly one scheduling type with `cron`, `fixedDelay`, `fixedRate`, or `oneShot`. Options such as `timezone`, `timeout`, `retry`, `createdAt`, `misfirePolicy`, and `misfireThreshold` can be composed where applicable.
 
 ## Advanced Usage
 
@@ -223,12 +226,53 @@ taskService.isPaused("myTask");  // true
 taskService.resume("myTask");
 ```
 
+### Misfire Handling (Late Fires & Pause-Gap Catch-Up)
+
+Recurring tasks can **opt in** to misfire handling, which covers two situations:
+a fire that starts more than `misfireThreshold` later than expected (thread-pool
+starvation, GC pause, system overload), and firings missed while the task was paused.
+
+```java
+taskService.task("report")
+    .cron("0 0 * * * *")
+    .misfirePolicy(MisfirePolicy.FIRE_ONCE)      // opt in
+    .misfireThreshold(Duration.ofSeconds(30))    // lateness tolerance
+    .register(this::generateReport);
+
+// Or configure an already-registered task at runtime:
+taskService.setMisfireConfig("report", MisfirePolicy.SKIP, Duration.ofSeconds(10));
+```
+
+| Policy | Late fire (> threshold) | Catch-up on `resume()` |
+|--------|-------------------------|------------------------|
+| `SKIP` | Skipped — recorded as `MISFIRE_SKIPPED` in history + `recordMisfire` metric | None |
+| `FIRE_ONCE` | Executes normally (logged + counted) | One execution — only if the pause gap actually missed a firing |
+| `FIRE_IMMEDIATELY` | Executes normally (logged + counted) | `min(missed, 10)` executions |
+
+Key semantics:
+
+- **Opt-in**: a task that never receives a misfire configuration keeps the classic
+  behavior — no late-fire detection, no catch-up. This includes tasks restored from
+  1.2.x-persisted `TaskDefinition`s (both misfire fields `null`). Setting only one of
+  policy/threshold fills the other from the documented defaults (`FIRE_ONCE` / 30s).
+- **Delegate runtime is never lateness**: the expected-fire baseline follows how Spring
+  actually schedules the next fire — completion-based for `FIXED_DELAY` and `CRON`,
+  grid-based for `FIXED_RATE`.
+- **Catch-up runs serially** through the full instrumented pipeline (distributed lock,
+  listeners, history, metrics) and never overlaps a regular fire of the same task.
+  Re-pausing during a burst aborts the remaining executions.
+- **Restore after restart**: persisted misfire settings are re-applied by
+  `restoreTasks()`, but the downtime gap itself is never compensated — the first fire
+  after restart re-seeds the baseline.
+- One-shot tasks ignore the misfire policy entirely.
+- `GET /actuator/flexschedule/{name}` reports the configured `misfirePolicy` /
+  `misfireThreshold` (`null` when the task is unconfigured).
+
 ### Persistence
 
 flex-schedule ships **no persistence default** — the scheduler core is pure in-memory
 (`InMemoryTaskRepository`). When tasks need to survive restarts, consumers provide their
 own `TaskRepository` bean.
-
 **Two trigger shapes, two ways to persist**:
 
 1. **Bean-method triggers** (you already have `TaskDefinition`):

@@ -21,6 +21,7 @@
 - **时区支持** — Cron 任务可指定时区（`addCronTask(name, cron, ZoneId, runnable)`）
 - **一次性延迟任务** — 延迟执行一次后自动移除
 - **失败重试** — 固定间隔或指数退避，可配置最大延迟
+- **Misfire 处理** — 按任务可选启用的迟到触发检测与暂停补偿（`MisfirePolicy`：SKIP / FIRE_ONCE / FIRE_IMMEDIATELY）
 - **执行超时** — 自动中断超时任务
 - **任务依赖链** — 使用 `TaskChain` 构建器顺序执行任务
 - **执行历史** — 按任务记录的内存环形缓冲区
@@ -143,7 +144,9 @@ record TaskInfo(String taskName, String taskType, String schedule) {}
 
 record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
-                  boolean paused) {}
+                  boolean paused, MisfirePolicy misfirePolicy,
+                  Duration misfireThreshold) {}
+// misfirePolicy / misfireThreshold：未配置 misfire 处理时为 null
 ```
 
 ### 流式任务构建器
@@ -156,7 +159,7 @@ taskService.task("cleanup")
     .register(this::cleanup);
 ```
 
-通过 `cron`、`fixedDelay`、`fixedRate` 或 `oneShot` 选择且仅选择一种调度类型；`timezone`、`timeout`、`retry`、`createdAt` 等选项可按需组合。
+通过 `cron`、`fixedDelay`、`fixedRate` 或 `oneShot` 选择且仅选择一种调度类型；`timezone`、`timeout`、`retry`、`createdAt`、`misfirePolicy`、`misfireThreshold` 等选项可按需组合。
 
 ## 高级用法
 
@@ -222,6 +225,43 @@ taskService.isPaused("myTask");  // true
 // 恢复
 taskService.resume("myTask");
 ```
+
+### Misfire 处理（迟到触发与暂停补偿）
+
+循环任务可以**按需选择开启** misfire 处理，覆盖两种情况：实际触发时间比预期晚超过
+`misfireThreshold`（线程池饥饿、GC 停顿、系统过载），以及暂停期间错过的触发。
+
+```java
+taskService.task("report")
+    .cron("0 0 * * * *")
+    .misfirePolicy(MisfirePolicy.FIRE_ONCE)      // 开启 misfire 处理
+    .misfireThreshold(Duration.ofSeconds(30))    // 迟到容忍阈值
+    .register(this::generateReport);
+
+// 也可以对已注册任务在运行时配置：
+taskService.setMisfireConfig("report", MisfirePolicy.SKIP, Duration.ofSeconds(10));
+```
+
+| 策略 | 迟到触发（> 阈值） | `resume()` 暂停补偿 |
+|------|---------------------|----------------------|
+| `SKIP` | 跳过本次执行 — 历史中记录 `MISFIRE_SKIPPED`，并上报 `recordMisfire` 指标 | 不补偿 |
+| `FIRE_ONCE` | 照常执行（记日志 + 计数） | 补偿一次 — 仅当暂停期间确实错过了触发 |
+| `FIRE_IMMEDIATELY` | 照常执行（记日志 + 计数） | 补偿 `min(missed, 10)` 次 |
+
+关键语义：
+
+- **按需开启**：从未配置过 misfire 的任务保持经典行为 — 不做迟到检测、不做暂停补偿。
+  从 1.2.x 持久化数据恢复的 `TaskDefinition`（两个 misfire 字段均为 `null`）同样豁免。
+  只设置 policy/threshold 之一时，另一侧回落到文档默认值（`FIRE_ONCE` / 30s）。
+- **任务执行耗时不算迟到**：期望触发基线与 Spring 实际调度下一次触发的方式一致 —
+  `FIXED_DELAY` 与 `CRON` 基于完成时间，`FIXED_RATE` 基于时间网格。
+- **补偿串行执行**，走完整的 instrument 管线（分布式锁、监听器、历史、指标），
+  且绝不会与同一任务的常规触发并发执行；补偿过程中重新暂停会中止剩余执行。
+- **重启恢复**：`restoreTasks()` 会重新应用持久化的 misfire 配置，但停机窗口本身
+  不做补偿 — 重启后第一次触发重新播种基线。
+- 一次性任务完全忽略 misfire 策略。
+- `GET /actuator/flexschedule/{name}` 会返回已配置的 `misfirePolicy` /
+  `misfireThreshold`（未配置时为 `null`）。
 
 ### 持久化
 
