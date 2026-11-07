@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Multi-module Spring Boot Starter library providing flex scheduling thread pool management. Allows adding/removing/pausing scheduled tasks at runtime using cron, fixedDelay, or fixedRate expressions. Supports retry, execution timeout, task chains, execution history, cluster-aware scheduling, Micrometer metrics, and an Actuator endpoint.
+Multi-module Spring Boot Starter library providing flex scheduling thread pool management. Allows adding/removing/pausing scheduled tasks at runtime using cron, fixedDelay, or fixedRate expressions. Supports retry, execution timeout, task chains, execution history, cluster-aware scheduling, opt-in misfire handling (late-fire detection + pause-gap catch-up), Micrometer metrics, and an Actuator endpoint.
 
 - **Language**: Java 25+ (build requires a JDK 25 `JAVA_HOME`), Spring Boot 4.1.1
 - **Build**: Maven (no wrapper — `mvnw` was removed; use system `mvn`)

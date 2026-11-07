@@ -271,7 +271,10 @@ flex-schedule **不提供持久化默认实现** — 调度核心是纯内存的
 **两种触发形式，两种持久化姿势**：
 
 1. **bean-method 触发**（已持有 `TaskDefinition`）：
-   - 把 `TaskDefinition`（含 `beanName` / `methodName` / `createdAt`）持久化到自有的存储。
+   - 把 `TaskDefinition`（含 `beanName` / `methodName` / `createdAt`，以及可选的
+     `misfirePolicy` / `misfireThreshold`）持久化到自有的存储。两个 misfire 字段
+     均保持 `null` 时，还原后的任务豁免于 misfire 处理（1.3.0 之前的行为）；
+     持久化的值会由 `restoreTasks()` 重新应用。
    - 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()` —— 它读取
      `TaskRepository.findAll()` 并按持久化的 `createdAt` 还原每条记录。
 

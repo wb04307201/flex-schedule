@@ -273,11 +273,14 @@ Key semantics:
 flex-schedule ships **no persistence default** — the scheduler core is pure in-memory
 (`InMemoryTaskRepository`). When tasks need to survive restarts, consumers provide their
 own `TaskRepository` bean.
+
 **Two trigger shapes, two ways to persist**:
 
 1. **Bean-method triggers** (you already have `TaskDefinition`):
-   - Persist `TaskDefinition` (including `beanName` / `methodName` / `createdAt`)
-     to your store.
+   - Persist `TaskDefinition` (including `beanName` / `methodName` / `createdAt`,
+     and optionally `misfirePolicy` / `misfireThreshold`) to your store. Keeping
+     both misfire fields `null` restores the task exempt from misfire handling
+     (pre-1.3.0 behavior); persisted values are re-applied by `restoreTasks()`.
    - On startup, call `FlexScheduledTaskRegistrar.restoreTasks()` — it reads
      `TaskRepository.findAll()` and rehydrates each row honoring the persisted
      `createdAt`.
