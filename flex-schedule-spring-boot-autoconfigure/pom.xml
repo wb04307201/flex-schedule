@@ -89,6 +89,16 @@
                             <artifactId>lombok</artifactId>
                             <version>${lombok.version}</version>
                         </path>
+                        <!-- Generates META-INF/spring-configuration-metadata.json so IDEs
+                             offer completion for every flex.schedule.* property (including
+                             the limits.* group). Must be listed AFTER lombok. This module
+                             overrides the parent compiler config, so the processor must be
+                             declared here too. -->
+                        <path>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-configuration-processor</artifactId>
+                            <version>${spring-boot.version}</version>
+                        </path>
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
