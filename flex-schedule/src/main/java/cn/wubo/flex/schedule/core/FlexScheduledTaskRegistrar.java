@@ -1130,10 +1130,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         if (entry == null) {
             return Optional.empty();
         }
+        MisfireConfig misfire = misfireConfigs.get(taskName);
         return Optional.of(new TaskDetail(
                 taskName, entry.taskType(), entry.schedule(),
                 entry.oneShot(), entry.retryPolicy(), entry.createdAt(),
-                pausedTasks.contains(taskName)));
+                pausedTasks.contains(taskName),
+                misfire != null ? misfire.policy() : null,
+                misfire != null ? misfire.threshold() : null));
     }
 
     // ─── Lifecycle ───────────────────────────────────────────────────

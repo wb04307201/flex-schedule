@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule;
 
 import cn.wubo.flex.schedule.core.Backoff;
+import cn.wubo.flex.schedule.core.MisfirePolicy;
 import cn.wubo.flex.schedule.core.RetryPolicy;
 import cn.wubo.flex.schedule.core.TaskDetail;
 import org.junit.jupiter.api.Test;
@@ -83,5 +84,24 @@ class TaskDetailTest {
         assertTrue(str.contains("task1"));
         assertTrue(str.contains("CRON"));
         assertTrue(str.contains("0 * * * * *"));
+    }
+
+    @Test
+    void misfireFields_shouldBeExposed() {
+        Instant now = Instant.now();
+        TaskDetail detail = new TaskDetail("task1", "FIXED_RATE", "PT10S/PT0S", false, null, now, false,
+                MisfirePolicy.SKIP, Duration.ofSeconds(5));
+
+        assertEquals(MisfirePolicy.SKIP, detail.misfirePolicy());
+        assertEquals(Duration.ofSeconds(5), detail.misfireThreshold());
+    }
+
+    @Test
+    void legacySevenArgConstructor_shouldLeaveMisfireNull() {
+        Instant now = Instant.now();
+        TaskDetail detail = new TaskDetail("task1", "CRON", "0 * * * * *", false, null, now, false);
+
+        assertNull(detail.misfirePolicy(), "unconfigured tasks report null misfire policy");
+        assertNull(detail.misfireThreshold(), "unconfigured tasks report null misfire threshold");
     }
 }
