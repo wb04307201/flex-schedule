@@ -28,7 +28,7 @@ package cn.wubo.flex.schedule.core;
  *   <tr>
  *     <td>Pause-gap catch-up on resume</td>
  *     <td>No catch-up fires</td>
- *     <td>One catch-up fire</td>
+ *     <td>One catch-up fire if the gap missed at least one firing, none otherwise</td>
  *     <td>{@code min(missed, 10)} catch-up fires</td>
  *   </tr>
  * </table>

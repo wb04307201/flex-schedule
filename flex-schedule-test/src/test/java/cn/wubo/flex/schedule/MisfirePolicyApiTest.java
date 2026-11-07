@@ -47,7 +47,7 @@ class MisfirePolicyApiTest {
     // ─── 1. backward compatibility: old 15-arg canonical constructor ───────
 
     @Test
-    void oldFifteenArgConstructor_stillCompiles_andGetsDefaults() {
+    void oldFifteenArgConstructor_stillCompiles_andStaysUnconfigured() {
         Instant now = Instant.now();
         TaskDefinition def = new TaskDefinition(
                 "legacyTask",          // taskName
@@ -67,9 +67,11 @@ class MisfirePolicyApiTest {
                 now                    // updatedAt
         );
 
-        assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
-        assertEquals(Duration.ofSeconds(30), def.misfireThreshold());
-        // Pin the constant values the compat constructor delegates with.
+        // 1.2.x-era callers never heard of misfire handling: the compat
+        // constructor must keep them UNCONFIGURED (exempt), not opt them in.
+        assertNull(def.misfirePolicy(), "legacy definitions must stay unconfigured");
+        assertNull(def.misfireThreshold(), "legacy definitions must stay unconfigured");
+        // Pin the constant values used to fill a partially-configured definition.
         assertEquals(MisfirePolicy.FIRE_ONCE, TaskDefinition.DEFAULT_MISFIRE_POLICY);
         assertEquals(Duration.ofSeconds(30), TaskDefinition.DEFAULT_MISFIRE_THRESHOLD);
     }
@@ -77,15 +79,13 @@ class MisfirePolicyApiTest {
     // ─── 2. definition builder defaults when misfire setters are unused ────
 
     @Test
-    void builder_defaults() {
+    void builder_defaults_stayUnconfigured() {
         TaskDefinition def = TaskDefinition.builder("defaultMisfire", "CRON")
                 .cronExpression("0 * * * * *")
                 .build();
 
-        assertEquals(TaskDefinition.DEFAULT_MISFIRE_POLICY, def.misfirePolicy());
-        assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
-        assertEquals(TaskDefinition.DEFAULT_MISFIRE_THRESHOLD, def.misfireThreshold());
-        assertEquals(Duration.ofSeconds(30), def.misfireThreshold());
+        assertNull(def.misfirePolicy(), "unset means unconfigured (exempt), not defaulted");
+        assertNull(def.misfireThreshold(), "unset means unconfigured (exempt), not defaulted");
     }
 
     // ─── 3. fluent setters transmit values; other fields unaffected ───────
@@ -187,24 +187,25 @@ class MisfirePolicyApiTest {
         assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
     }
 
-    // ─── 6. persistence carrier: null misfire fields (1.2.x JSON) get defaults ──
+    // ─── 6. persistence carrier: null misfire fields (1.2.x JSON) stay exempt ──
 
     /**
      * TaskDefinition is the documented persistence carrier: a definition serialized
      * by 1.2.x carries neither misfire field, so Jackson (or any deserializer)
-     * passes null for BOTH. The canonical constructor must default them exactly
-     * like the 15-arg compat constructor instead of throwing — otherwise
-     * restoreTasks() silently skips every 1.2.x-persisted task.
+     * passes null for BOTH. The canonical constructor must accept nulls without
+     * throwing (so restoreTasks() keeps loading pre-1.3.0 payloads) AND keep them
+     * null — null means "misfire handling not configured", preserving the exact
+     * pre-1.3.0 runtime behavior (no late-fire detection, no pause-gap catch-up).
      */
     @Test
-    void canonicalConstructor_nullMisfireFields_getsDefaults() {
+    void canonicalConstructor_nullMisfireFields_stayUnconfigured() {
         Instant now = Instant.now();
         TaskDefinition def = new TaskDefinition(
                 "t", "CRON", null, null, null, null, null, null, null,
                 "b", "m", List.of(), false, now, now,
                 null, null);
-        assertEquals(MisfirePolicy.FIRE_ONCE, def.misfirePolicy());
-        assertEquals(Duration.ofSeconds(30), def.misfireThreshold());
+        assertNull(def.misfirePolicy(), "both-null must stay unconfigured (exempt)");
+        assertNull(def.misfireThreshold(), "both-null must stay unconfigured (exempt)");
     }
 
     @Test

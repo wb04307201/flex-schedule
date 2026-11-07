@@ -32,8 +32,10 @@ public class TaskBuilder {
     private Duration initialDelay = Duration.ZERO;
     private Duration oneShotDelay;
     private Instant createdAt;
-    private MisfirePolicy misfirePolicy = TaskDefinition.DEFAULT_MISFIRE_POLICY;
-    private Duration misfireThreshold = TaskDefinition.DEFAULT_MISFIRE_THRESHOLD;
+    /** {@code null} = misfire handling not requested; the task stays exempt (pre-1.3.0 behavior). */
+    private MisfirePolicy misfirePolicy;
+    /** {@code null} = not requested; falls back to the 30s default once any misfire setting is made. */
+    private Duration misfireThreshold;
 
     TaskBuilder(FlexScheduledTaskService service, String taskName) {
         this.service = service;
@@ -137,7 +139,7 @@ public class TaskBuilder {
     /**
      * Sets the misfire policy for this task. Applies to recurring task types
      * only; one-shot tasks ignore it. Must not be null — leave unset to keep
-     * the default {@link MisfirePolicy#FIRE_ONCE}.
+     * the task exempt from misfire handling entirely (pre-1.3.0 behavior).
      * <p>
      * {@link #register(Runnable)} applies the value to the registrar right after
      * the task is scheduled, so late-fire detection and pause-gap catch-up take
@@ -152,7 +154,10 @@ public class TaskBuilder {
 
     /**
      * Sets the lateness threshold beyond which a trigger is considered a
-     * misfire. Must not be null; leave unset to keep the default of 30 seconds.
+     * misfire. Must not be null and must be strictly positive — validated here
+     * so an invalid value fails fast, BEFORE {@link #register(Runnable)}
+     * schedules anything. Leave unset to keep the task exempt from misfire
+     * handling entirely (pre-1.3.0 behavior).
      * <p>
      * Applied by {@link #register(Runnable)} right after scheduling (see
      * {@link #misfirePolicy(MisfirePolicy)}).
@@ -160,6 +165,8 @@ public class TaskBuilder {
      */
     public TaskBuilder misfireThreshold(Duration misfireThreshold) {
         Assert.notNull(misfireThreshold, "misfireThreshold must not be null");
+        Assert.isTrue(misfireThreshold.compareTo(Duration.ZERO) > 0,
+                "misfireThreshold must be positive, was " + misfireThreshold);
         this.misfireThreshold = misfireThreshold;
         return this;
     }
@@ -214,9 +221,14 @@ public class TaskBuilder {
 
         // Wire misfire settings into the registrar so runtime late-fire detection and
         // resume catch-up can see them (same post-registration pattern as createdAt).
+        // Only when the caller actually opted in: with neither setter called the task
+        // stays exempt from misfire handling entirely (pre-1.3.0 behavior). Setting
+        // exactly one side fills the other from the TaskDefinition defaults.
         // ONE_SHOT tasks ignore the misfire policy entirely, so skip the wiring.
-        if (oneShotDelay == null) {
-            service.setMisfireConfig(taskName, misfirePolicy, misfireThreshold);
+        if (oneShotDelay == null && (misfirePolicy != null || misfireThreshold != null)) {
+            service.setMisfireConfig(taskName,
+                    misfirePolicy != null ? misfirePolicy : TaskDefinition.DEFAULT_MISFIRE_POLICY,
+                    misfireThreshold != null ? misfireThreshold : TaskDefinition.DEFAULT_MISFIRE_THRESHOLD);
         }
     }
 }

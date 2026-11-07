@@ -385,24 +385,25 @@ class MisfirePolicyBehaviorTest {
         r.pause("skipResume");
     }
 
-    // ─── 6. resume + FIRE_ONCE: exactly one catch-up ──────────────────
+    // ─── 6. resume + FIRE_ONCE: exactly one catch-up when a firing was missed ──
 
     @Test
     void resumeAfterPause_fireOnce_catchesUpExactlyOnce() throws Exception {
         FlexScheduledTaskRegistrar r = newRegistrar(2, "misfire-resume-once-", null);
         AtomicInteger counter = new AtomicInteger();
-        // Long interval keeps the regular cadence out of the assertion window:
-        // after the catch-up the counter must stay stable (poll-to-stable).
-        r.addFixedDelayTask("onceResume", Duration.ofSeconds(5), Duration.ZERO, counter::incrementAndGet);
+        // FIRE_ONCE catches up only when the pause gap actually missed a firing,
+        // so the pause below must span at least one 2s interval. After the
+        // catch-up the counter must stay stable (poll-to-stable).
+        r.addFixedDelayTask("onceResume", Duration.ofSeconds(2), Duration.ZERO, counter::incrementAndGet);
         r.setMisfireConfig("onceResume", MisfirePolicy.FIRE_ONCE, Duration.ofSeconds(30));
 
         awaitTrue(() -> counter.get() >= 1, 3000, "first fire");
         r.pause("onceResume");
-        Thread.sleep(400);
+        Thread.sleep(2400); // > one interval: exactly one firing missed
         r.resume("onceResume");
 
         awaitTrue(() -> counter.get() >= 2, 3000, "FIRE_ONCE should catch up once on resume");
-        Thread.sleep(500); // stable-poll window; next regular fire is ~5s away
+        Thread.sleep(400); // stable-poll window; next regular fire is ~2s away
         assertEquals(2, counter.get(), "catch-up must be exactly one execution");
     }
 
@@ -606,7 +607,9 @@ class MisfirePolicyBehaviorTest {
             ctx.refresh();
             new SpringContextUtils().setApplicationContext(ctx);
 
-            Instant updatedAt = Instant.now().minusMillis(400);
+            // pausedAt is anchored at updatedAt; the gap must span at least one
+            // 5s interval for FIRE_ONCE to catch up ("fire once IF missed").
+            Instant updatedAt = Instant.now().minusSeconds(6);
             TaskDefinition def = TaskDefinition.builder("restoredPaused", "FIXED_DELAY")
                     .interval(Duration.ofSeconds(5))     // long interval: no regular fire in-window
                     .initialDelay(Duration.ofSeconds(10))

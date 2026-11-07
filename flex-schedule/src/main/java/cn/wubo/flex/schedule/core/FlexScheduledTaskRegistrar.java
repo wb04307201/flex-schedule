@@ -45,7 +45,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      *       or lock-denied), expected = completion + interval, matching Spring's fixed-delay
      *       contract so delegate runtime never counts as lateness.</li>
      *   <li>FIXED_RATE: grid-based — expected advances by interval until strictly after the actual start.</li>
-     *   <li>CRON: expected = next {@link CronExpression} boundary after the actual start (task timezone).</li>
+     *   <li>CRON: completion-based — Spring's CronTrigger computes the next fire from the
+     *       COMPLETION time, so the baseline is rebased to the first cron boundary strictly
+     *       after each fire's completion; delegate runtime that crosses a boundary is never
+     *       counted as lateness.</li>
      * </ul>
      * The first fire after registration, {@link #setMisfireConfig}, or {@link #resume}
      * only seeds the baseline and is never itself judged (the tracker holds no entry).
@@ -56,6 +59,13 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     private final Map<String, Instant> nextExpectedFire = new ConcurrentHashMap<>();
     /** Outermost wrapped (instrumented, retry-aware) runnable per task, replayed serially for resume catch-up. */
     private final Map<String, Runnable> instrumentedRunnables = new ConcurrentHashMap<>();
+    /**
+     * Tasks with a fire currently executing on this node. A regular fire and a resume
+     * catch-up burst (or two late-queued fires) can land on different scheduler threads
+     * at the same moment; the instrumented runnable skips execution when the task is
+     * already in flight, preserving the single-node non-overlap guarantee.
+     */
+    private final Set<String> executingTasks = ConcurrentHashMap.newKeySet();
     private final long awaitTerminationSeconds;
     private final AtomicReference<MetricsRecorder> metricsRecorder = new AtomicReference<>(MetricsRecorder.NOOP);
     private volatile ExecutionHistory executionHistory = ExecutionHistory.NOOP;
@@ -280,7 +290,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         Runnable wrapped = def.retryPolicy() != null
                 ? wrapRunnable(def.taskName(), runnable, def.retryPolicy())
                 : wrapRunnable(def.taskName(), runnable);
-        return switch (def.taskType()) {
+        ScheduledTask scheduledTask = switch (def.taskType()) {
             case "CRON" -> {
                 if (def.timezone() != null) {
                     org.springframework.scheduling.support.CronTrigger trigger =
@@ -302,6 +312,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
             }
             default -> throw new IllegalArgumentException("Unknown task type: " + def.taskType());
         };
+        publishInstrumented(def.taskName(), wrapped);
+        return scheduledTask;
     }
 
     /**
@@ -344,8 +356,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
-            CronTask cronTask = new CronTask(wrapRunnable(taskName, runnable), cron);
+            Runnable wrapped = wrapRunnable(taskName, runnable);
+            CronTask cronTask = new CronTask(wrapped, cron);
             ScheduledTask scheduledTask = this.scheduleCronTask(cronTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "CRON", cron);
             taskMap.put(taskName, entry);
             log.info("Added cron task [{}] with expression [{}]", taskName, cron);
@@ -381,8 +395,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         try {
             org.springframework.scheduling.support.CronTrigger trigger =
                     new org.springframework.scheduling.support.CronTrigger(cron, zoneId);
-            CronTask cronTask = new CronTask(wrapRunnable(taskName, runnable), trigger);
+            Runnable wrapped = wrapRunnable(taskName, runnable);
+            CronTask cronTask = new CronTask(wrapped, trigger);
             ScheduledTask scheduledTask = this.scheduleCronTask(cronTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "CRON", scheduleDesc);
             taskMap.put(taskName, entry);
             log.info("Added cron task [{}] with expression [{}] in timezone [{}]", taskName, cron, zoneId);
@@ -465,9 +481,11 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
+            Runnable wrapped = wrapRunnable(taskName, runnable);
             FixedDelayTask fixedDelayTask = new FixedDelayTask(
-                    wrapRunnable(taskName, runnable), interval, initialDelay);
+                    wrapped, interval, initialDelay);
             ScheduledTask scheduledTask = this.scheduleFixedDelayTask(fixedDelayTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_DELAY",
                     interval + "/" + initialDelay);
             taskMap.put(taskName, entry);
@@ -508,9 +526,11 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
+            Runnable wrapped = wrapRunnable(taskName, runnable);
             FixedRateTask fixedRateTask = new FixedRateTask(
-                    wrapRunnable(taskName, runnable), interval, initialDelay);
+                    wrapped, interval, initialDelay);
             ScheduledTask scheduledTask = this.scheduleFixedRateTask(fixedRateTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_RATE",
                     interval + "/" + initialDelay);
             taskMap.put(taskName, entry);
@@ -542,8 +562,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
-            CronTask cronTask = new CronTask(wrapRunnable(taskName, runnable, retryPolicy), cron);
+            Runnable wrapped = wrapRunnable(taskName, runnable, retryPolicy);
+            CronTask cronTask = new CronTask(wrapped, cron);
             ScheduledTask scheduledTask = this.scheduleCronTask(cronTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "CRON", cron,
                     retryPolicy, false, Instant.now());
             taskMap.put(taskName, entry);
@@ -585,8 +607,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         try {
             org.springframework.scheduling.support.CronTrigger trigger =
                     new org.springframework.scheduling.support.CronTrigger(cron, zoneId);
-            CronTask cronTask = new CronTask(wrapRunnable(taskName, runnable, retryPolicy), trigger);
+            Runnable wrapped = wrapRunnable(taskName, runnable, retryPolicy);
+            CronTask cronTask = new CronTask(wrapped, trigger);
             ScheduledTask scheduledTask = this.scheduleCronTask(cronTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "CRON", scheduleDesc,
                     retryPolicy, false, createdAt);
             taskMap.put(taskName, entry);
@@ -621,9 +645,11 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
+            Runnable wrapped = wrapRunnable(taskName, runnable, retryPolicy);
             FixedDelayTask fixedDelayTask = new FixedDelayTask(
-                    wrapRunnable(taskName, runnable, retryPolicy), interval, initialDelay);
+                    wrapped, interval, initialDelay);
             ScheduledTask scheduledTask = this.scheduleFixedDelayTask(fixedDelayTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_DELAY",
                     interval + "/" + initialDelay, retryPolicy, false, Instant.now());
             taskMap.put(taskName, entry);
@@ -657,9 +683,11 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         }
 
         try {
+            Runnable wrapped = wrapRunnable(taskName, runnable, retryPolicy);
             FixedRateTask fixedRateTask = new FixedRateTask(
-                    wrapRunnable(taskName, runnable, retryPolicy), interval, initialDelay);
+                    wrapped, interval, initialDelay);
             ScheduledTask scheduledTask = this.scheduleFixedRateTask(fixedRateTask);
+            publishInstrumented(taskName, wrapped);
             ScheduledTaskEntry entry = new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_RATE",
                     interval + "/" + initialDelay, retryPolicy, false, Instant.now());
             taskMap.put(taskName, entry);
@@ -686,7 +714,11 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         // Schedule the new task BEFORE cancelling the old one. If scheduling
         // fails, the old entry remains in taskMap with its ScheduledTask still
         // active — never an un-fireable zombie referencing a cancelled future.
-        CronTask cronTask = new CronTask(wrapRunnable(taskName, runnable), cron);
+        // wrapRunnable is pure; the catch-up replay map is only repointed AFTER
+        // the compute swap succeeded, so a failed replace keeps replaying the
+        // OLD (still live) runnable.
+        Runnable wrapped = wrapRunnable(taskName, runnable);
+        CronTask cronTask = new CronTask(wrapped, cron);
         ScheduledTask scheduledTask = this.scheduleCronTask(cronTask);
         final boolean[] replaced = {false};
         try {
@@ -703,6 +735,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 nextExpectedFire.remove(taskName);
                 return new ScheduledTaskEntry(scheduledTask::cancel, "CRON", cron);
             });
+            publishInstrumented(taskName, wrapped);
         } catch (RuntimeException ex) {
             // If the compute lambda threw after the new task was already
             // scheduled, the new task would otherwise leak (taskMap doesn't
@@ -733,8 +766,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         pausedTasks.remove(taskName);
         // Schedule the new task BEFORE cancelling the old one so a scheduling
         // failure cannot leave a zombie entry pointing at a cancelled future.
+        // wrapRunnable is pure; publishInstrumented runs only after the swap.
+        Runnable wrapped = wrapRunnable(taskName, runnable);
         FixedDelayTask fixedDelayTask = new FixedDelayTask(
-                wrapRunnable(taskName, runnable), interval, initialDelay);
+                wrapped, interval, initialDelay);
         ScheduledTask scheduledTask = this.scheduleFixedDelayTask(fixedDelayTask);
         final boolean[] existed = {false};
         try {
@@ -750,6 +785,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 return new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_DELAY",
                         interval + "/" + initialDelay);
             });
+            publishInstrumented(taskName, wrapped);
         } catch (RuntimeException ex) {
             try {
                 scheduledTask.cancel();
@@ -777,8 +813,10 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         pausedTasks.remove(taskName);
         // Schedule the new task BEFORE cancelling the old one so a scheduling
         // failure cannot leave a zombie entry pointing at a cancelled future.
+        // wrapRunnable is pure; publishInstrumented runs only after the swap.
+        Runnable wrapped = wrapRunnable(taskName, runnable);
         FixedRateTask fixedRateTask = new FixedRateTask(
-                wrapRunnable(taskName, runnable), interval, initialDelay);
+                wrapped, interval, initialDelay);
         ScheduledTask scheduledTask = this.scheduleFixedRateTask(fixedRateTask);
         final boolean[] existed = {false};
         try {
@@ -794,6 +832,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 return new ScheduledTaskEntry(scheduledTask::cancel, "FIXED_RATE",
                         interval + "/" + initialDelay);
             });
+            publishInstrumented(taskName, wrapped);
         } catch (RuntimeException ex) {
             try {
                 scheduledTask.cancel();
@@ -880,7 +919,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
      * {@link MisfirePolicy}:
      * <ul>
      *   <li>{@link MisfirePolicy#SKIP} — no catch-up executions;</li>
-     *   <li>{@link MisfirePolicy#FIRE_ONCE} — exactly one catch-up execution;</li>
+     *   <li>{@link MisfirePolicy#FIRE_ONCE} — one catch-up execution if the pause
+     *       gap actually missed at least one firing, none otherwise;</li>
      *   <li>{@link MisfirePolicy#FIRE_IMMEDIATELY} — {@code min(missed, MAX_CATCH_UP)}
      *       catch-up executions, where {@code missed} is the number of firings that
      *       elapsed during the pause (gap/interval for fixed tasks, cron iteration
@@ -1115,6 +1155,7 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         nextExpectedFire.clear();
         misfireConfigs.clear();
         instrumentedRunnables.clear();
+        executingTasks.clear();
 
         // Shutdown the scheduler executor
         ThreadPoolTaskScheduler scheduler = (ThreadPoolTaskScheduler) this.getScheduler();
@@ -1227,102 +1268,117 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                 return;
             }
 
-            // 2b. Misfire detection (must precede lock acquisition so a skipped fire
-            // never takes the distributed lock). SKIP returns without executing;
-            // FIRE_ONCE/FIRE_IMMEDIATELY fall through and execute as normal.
-            if (handleMisfire(taskName, Instant.now())) {
-                // The skipped fire "completes" now: rebase the FIXED_DELAY baseline
-                // so the next fire is judged against completion + interval.
-                rebaseFixedDelayOnCompletion(taskName);
+            // 2a. Single-node overlap guard: Spring never fires the same periodic task
+            // concurrently with itself, but a resume catch-up burst runs on its own
+            // scheduler submission and CAN land on top of a regular fire. The task set
+            // makes the two paths mutually exclusive by skipping the later arrival —
+            // a skipped fire completes immediately and the cadence reschedules from it.
+            if (!executingTasks.add(taskName)) {
+                log.debug("Task [{}] is already executing on this node, skipping overlapping fire", taskName);
                 return;
             }
+            try {
+                // 2b. Misfire detection (must precede lock acquisition so a skipped fire
+                // never takes the distributed lock). SKIP returns without executing;
+                // FIRE_ONCE/FIRE_IMMEDIATELY fall through and execute as normal.
+                if (handleMisfire(taskName, Instant.now())) {
+                    // The skipped fire "completes" now: rebase the completion-based
+                    // baseline (FIXED_DELAY / CRON) so the next fire is judged against
+                    // the cadence Spring actually schedules from this completion.
+                    rebaseExpectedFireOnCompletion(taskName);
+                    return;
+                }
 
-            // Check distributed lock for cluster-aware scheduling
-            Duration lockDuration = resolveLockDuration(entry);
-            if (!distributedLock.tryLock(taskName, lockDuration)) {
-                log.debug("Task [{}] could not acquire distributed lock, skipping execution", taskName);
-                // Lock-denied fires also "complete" immediately (see above).
-                rebaseFixedDelayOnCompletion(taskName);
-                return;
-            }
+                // Check distributed lock for cluster-aware scheduling
+                Duration lockDuration = resolveLockDuration(entry);
+                if (!distributedLock.tryLock(taskName, lockDuration)) {
+                    log.debug("Task [{}] could not acquire distributed lock, skipping execution", taskName);
+                    // Lock-denied fires also "complete" immediately (see above).
+                    rebaseExpectedFireOnCompletion(taskName);
+                    return;
+                }
 
-            Instant startTime = Instant.now();
-            long startNanos = System.nanoTime();
-            String taskType = resolveTaskType(taskName);
+                Instant startTime = Instant.now();
+                long startNanos = System.nanoTime();
+                String taskType = resolveTaskType(taskName);
 
-            // Before execution
-            for (TaskExecutionListener listener : listeners) {
-                if (listener.isAsync()) {
-                    submitAsync(() -> {
+                // Before execution
+                for (TaskExecutionListener listener : listeners) {
+                    if (listener.isAsync()) {
+                        submitAsync(() -> {
+                            try {
+                                listener.beforeExecution(taskName);
+                            } catch (Exception e) {
+                                log.error("Async listener beforeExecution error for task [{}]: {}", taskName, e.getMessage(), e);
+                            }
+                        }, taskName, "beforeExecution");
+                    } else {
                         try {
                             listener.beforeExecution(taskName);
                         } catch (Exception e) {
-                            log.error("Async listener beforeExecution error for task [{}]: {}", taskName, e.getMessage(), e);
+                            log.error("Listener beforeExecution error for task [{}]: {}", taskName, e.getMessage(), e);
                         }
-                    }, taskName, "beforeExecution");
-                } else {
-                    try {
-                        listener.beforeExecution(taskName);
-                    } catch (Exception e) {
-                        log.error("Listener beforeExecution error for task [{}]: {}", taskName, e.getMessage(), e);
                     }
                 }
-            }
 
-            try {
-                delegate.run();
+                try {
+                    delegate.run();
 
-                // Success
-                Duration duration = Duration.ofNanos(System.nanoTime() - startNanos);
-                getMetricsRecorder().recordExecution(taskName, taskType, duration, true);
-                executionHistory.record(new ExecutionRecord(taskName, taskType, startTime, duration, true, null));
-                for (TaskExecutionListener listener : listeners) {
-                    if (listener.isAsync()) {
-                        submitAsync(() -> {
+                    // Success
+                    Duration duration = Duration.ofNanos(System.nanoTime() - startNanos);
+                    getMetricsRecorder().recordExecution(taskName, taskType, duration, true);
+                    executionHistory.record(new ExecutionRecord(taskName, taskType, startTime, duration, true, null));
+                    for (TaskExecutionListener listener : listeners) {
+                        if (listener.isAsync()) {
+                            submitAsync(() -> {
+                                try {
+                                    listener.afterExecution(taskName);
+                                } catch (Exception e) {
+                                    log.error("Async listener afterExecution error for task [{}]: {}", taskName, e.getMessage(), e);
+                                }
+                            }, taskName, "afterExecution");
+                        } else {
                             try {
                                 listener.afterExecution(taskName);
                             } catch (Exception e) {
-                                log.error("Async listener afterExecution error for task [{}]: {}", taskName, e.getMessage(), e);
+                                log.error("Listener afterExecution error for task [{}]: {}", taskName, e.getMessage(), e);
                             }
-                        }, taskName, "afterExecution");
-                    } else {
-                        try {
-                            listener.afterExecution(taskName);
-                        } catch (Exception e) {
-                            log.error("Listener afterExecution error for task [{}]: {}", taskName, e.getMessage(), e);
                         }
                     }
-                }
-            } catch (Exception e) {
-                // Failure
-                Duration duration = Duration.ofNanos(System.nanoTime() - startNanos);
-                getMetricsRecorder().recordExecution(taskName, taskType, duration, false);
-                executionHistory.record(new ExecutionRecord(taskName, taskType, startTime, duration, false, e.getMessage()));
-                final Exception error = e;
-                for (TaskExecutionListener listener : listeners) {
-                    if (listener.isAsync()) {
-                        submitAsync(() -> {
+                } catch (Exception e) {
+                    // Failure
+                    Duration duration = Duration.ofNanos(System.nanoTime() - startNanos);
+                    getMetricsRecorder().recordExecution(taskName, taskType, duration, false);
+                    executionHistory.record(new ExecutionRecord(taskName, taskType, startTime, duration, false, e.getMessage()));
+                    final Exception error = e;
+                    for (TaskExecutionListener listener : listeners) {
+                        if (listener.isAsync()) {
+                            submitAsync(() -> {
+                                try {
+                                    listener.onError(taskName, error);
+                                } catch (Exception ex) {
+                                    log.error("Async listener onError error for task [{}]: {}", taskName, ex.getMessage(), ex);
+                                }
+                            }, taskName, "onError");
+                        } else {
                             try {
-                                listener.onError(taskName, error);
+                                listener.onError(taskName, e);
                             } catch (Exception ex) {
-                                log.error("Async listener onError error for task [{}]: {}", taskName, ex.getMessage(), ex);
+                                log.error("Listener onError error for task [{}]: {}", taskName, ex.getMessage(), ex);
                             }
-                        }, taskName, "onError");
-                    } else {
-                        try {
-                            listener.onError(taskName, e);
-                        } catch (Exception ex) {
-                            log.error("Listener onError error for task [{}]: {}", taskName, ex.getMessage(), ex);
                         }
                     }
+                    throw e;
+                } finally {
+                    // Completion-based baseline (FIXED_DELAY / CRON): expected = next cadence
+                    // point after the completion instant, matching how Spring schedules the
+                    // next fire so delegate runtime never counts as lateness. Covers success
+                    // AND exception exits.
+                    rebaseExpectedFireOnCompletion(taskName);
+                    distributedLock.unlock(taskName);
                 }
-                throw e;
             } finally {
-                // Completion-based FIXED_DELAY baseline: expected = completion + interval,
-                // matching Spring's fixed-delay contract so delegate runtime never counts
-                // as lateness on the next fire. Covers success AND exception exits.
-                rebaseFixedDelayOnCompletion(taskName);
-                distributedLock.unlock(taskName);
+                executingTasks.remove(taskName);
             }
         };
     }
@@ -1514,18 +1570,38 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
                     if (next == null) {
                         next = actualStart;
                     }
-                    while (!next.isAfter(actualStart)) {
-                        next = next.plus(interval);
+                    if (!next.isAfter(actualStart)) {
+                        // Arithmetic advance (O(1)): first grid point strictly after
+                        // actualStart. An iteration loop here would run gap/interval
+                        // times and could stall a scheduler thread for tiny intervals
+                        // after a long thread-pool outage.
+                        try {
+                            long intervalNanos = interval.toNanos();
+                            long behindNanos = Duration.between(next, actualStart).toNanos();
+                            long steps = behindNanos / intervalNanos + 1;
+                            next = next.plusNanos(Math.multiplyExact(steps, intervalNanos));
+                        } catch (ArithmeticException overflow) {
+                            // Absurd interval/gap magnitudes: re-seed from the actual start.
+                            next = actualStart.plus(interval);
+                        }
                     }
                     nextExpectedFire.put(taskName, next);
                 }
             }
             case "CRON" -> {
-                CronExpression cron = parseScheduleCron(entry.schedule());
-                if (cron != null) {
-                    ZonedDateTime next = cron.next(actualStart.atZone(parseScheduleZone(entry.schedule())));
-                    if (next != null) {
-                        nextExpectedFire.put(taskName, next.toInstant());
+                // Completion-based cadence (matches Spring's CronTrigger contract: the
+                // next fire is computed from the completion instant). The baseline is
+                // rebased on every fire exit path (rebaseExpectedFireOnCompletion), so a
+                // delegate that runs past a cron boundary never counts as lateness.
+                // Here we only seed when no baseline exists yet; the seed is superseded
+                // by this fire's completion rebase.
+                if (!nextExpectedFire.containsKey(taskName)) {
+                    CronExpression cron = parseScheduleCron(entry.schedule());
+                    if (cron != null) {
+                        ZonedDateTime next = cron.next(actualStart.atZone(parseScheduleZone(entry.schedule())));
+                        if (next != null) {
+                            nextExpectedFire.put(taskName, next.toInstant());
+                        }
                     }
                 }
             }
@@ -1534,26 +1610,47 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
     }
 
     /**
-     * Rebases the FIXED_DELAY expected-fire baseline from the completion instant
-     * ({@code completion + interval}), matching Spring's fixed-delay contract where
-     * the next fire is scheduled after the previous execution completes. Called on
-     * every post-detection exit path of a fire — executed (delegate finally),
+     * Rebases the expected-fire baseline from the completion instant for
+     * completion-cadence task types, matching how Spring schedules the next fire:
+     * <ul>
+     *   <li>FIXED_DELAY — expected = completion + interval (Spring's fixed-delay
+     *       contract: the next fire is scheduled after the previous completes);</li>
+     *   <li>CRON — expected = first cron boundary strictly after completion
+     *       (Spring's CronTrigger computes nextExecutionTime from the completion
+     *       instant, so a delegate running past a boundary is on schedule, not late).</li>
+     * </ul>
+     * Called on every post-detection exit path of a fire — executed (delegate finally),
      * misfire-skipped, and lock-denied (the latter two "complete" immediately) — so
      * an on-schedule fire whose delegate runs longer than the misfire threshold is
-     * never judged as late. No-op for unconfigured tasks and non-FIXED_DELAY types;
-     * FIXED_RATE/CRON advance at fire start instead.
+     * never judged as late. No-op for unconfigured tasks; FIXED_RATE is grid-based
+     * and advances at fire start instead (see {@link #advanceExpectedFire}).
      */
-    private void rebaseFixedDelayOnCompletion(String taskName) {
+    private void rebaseExpectedFireOnCompletion(String taskName) {
         if (!misfireConfigs.containsKey(taskName)) {
             return;
         }
         ScheduledTaskEntry entry = taskMap.get(taskName);
-        if (entry == null || !"FIXED_DELAY".equals(entry.taskType())) {
+        if (entry == null) {
             return;
         }
-        Duration interval = parseScheduleInterval(entry.schedule());
-        if (interval != null) {
-            nextExpectedFire.put(taskName, Instant.now().plus(interval));
+        Instant completion = Instant.now();
+        switch (entry.taskType()) {
+            case "FIXED_DELAY" -> {
+                Duration interval = parseScheduleInterval(entry.schedule());
+                if (interval != null) {
+                    nextExpectedFire.put(taskName, completion.plus(interval));
+                }
+            }
+            case "CRON" -> {
+                CronExpression cron = parseScheduleCron(entry.schedule());
+                if (cron != null) {
+                    ZonedDateTime next = cron.next(completion.atZone(parseScheduleZone(entry.schedule())));
+                    if (next != null) {
+                        nextExpectedFire.put(taskName, next.toInstant());
+                    }
+                }
+            }
+            default -> { /* FIXED_RATE keeps its grid baseline; ONE_SHOT is not tracked */ }
         }
     }
 
@@ -1568,7 +1665,8 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
 
     /**
      * Computes how many catch-up executions the pause gap ({@code pausedAt → now})
-     * requires under the task's {@link MisfirePolicy}: SKIP → 0, FIRE_ONCE → 1,
+     * requires under the task's {@link MisfirePolicy}: SKIP → 0, FIRE_ONCE → 1 only
+     * if the gap actually missed at least one firing ("fire once IF missed"),
      * FIRE_IMMEDIATELY → {@code min(missed, MAX_CATCH_UP)}. Returns 0 for one-shot
      * tasks, tasks without misfire configuration, tasks that are not paused, and
      * tasks without a recorded {@code pausedAt} (e.g. non-paused restored tasks —
@@ -1582,24 +1680,45 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
         if (!pausedTasks.contains(taskName)) {
             return 0;
         }
-        return switch (config.policy()) {
-            case SKIP -> 0;
-            case FIRE_ONCE -> 1;
-            case FIRE_IMMEDIATELY -> {
-                Duration gap = Duration.between(entry.pausedAt(), Instant.now());
-                yield gap.isNegative() ? 0 : Math.min(countMissedFirings(entry, gap), MAX_CATCH_UP);
-            }
-        };
+        if (config.policy() == MisfirePolicy.SKIP) {
+            return 0;
+        }
+        Duration gap = Duration.between(entry.pausedAt(), Instant.now());
+        if (gap.isNegative() || gap.isZero()) {
+            return 0;
+        }
+        long missed = countMissedFirings(entry, gap);
+        if (config.policy() == MisfirePolicy.FIRE_ONCE) {
+            // A pause shorter than one cadence step missed nothing: no spurious
+            // immediate execution (which would be an unrequested side effect).
+            return missed > 0 ? 1 : 0;
+        }
+        return (int) Math.min(missed, MAX_CATCH_UP);
     }
 
-    /** Counts firings elapsed during {@code gap}: fixed tasks floor(gap/interval), cron by iteration. */
-    private int countMissedFirings(ScheduledTaskEntry entry, Duration gap) {
+    /**
+     * Counts firings elapsed during {@code gap}: fixed tasks via long division
+     * (saturated just above {@link #MAX_CATCH_UP} so huge gaps cannot overflow and
+     * sub-millisecond intervals cannot divide by zero), cron by bounded iteration.
+     */
+    private long countMissedFirings(ScheduledTaskEntry entry, Duration gap) {
         return switch (entry.taskType()) {
             case "FIXED_DELAY", "FIXED_RATE" -> {
                 Duration interval = parseScheduleInterval(entry.schedule());
-                yield (interval == null || interval.isZero())
-                        ? 0
-                        : (int) (gap.toMillis() / interval.toMillis());
+                if (interval == null || interval.isZero() || interval.isNegative()) {
+                    yield 0;
+                }
+                long missed;
+                try {
+                    // Duration.dividedBy is exact long division at nanosecond scale:
+                    // no division-by-zero for sub-millisecond intervals, no int cast.
+                    missed = gap.dividedBy(interval);
+                } catch (ArithmeticException overflow) {
+                    missed = MAX_CATCH_UP + 1L; // absurd magnitudes; the caller caps anyway
+                }
+                // Exact totals beyond the cap are irrelevant (the caller applies
+                // Math.min with MAX_CATCH_UP); saturating here keeps the value int-safe.
+                yield Math.min(missed, MAX_CATCH_UP + 1L);
             }
             case "CRON" -> {
                 CronExpression cron = parseScheduleCron(entry.schedule());
@@ -1733,20 +1852,31 @@ public class FlexScheduledTaskRegistrar extends ScheduledTaskRegistrar {
 
     /**
      * Wraps a runnable with instrumentation (listeners + metrics).
+     * <p>
+     * PURE: does not touch {@link #instrumentedRunnables} — call sites publish the
+     * result via {@link #publishInstrumented} only AFTER scheduling succeeded, so a
+     * failed add/replace can never leave the catch-up replay map pointing at a
+     * runnable that was rejected (or leak an entry for a task that never existed).
      */
     private Runnable wrapRunnable(String taskName, Runnable delegate) {
-        Runnable instrumented = instrument(taskName, delegate);
-        instrumentedRunnables.put(taskName, instrumented);
-        return instrumented;
+        return instrument(taskName, delegate);
     }
 
     /**
      * Wraps a runnable with instrumentation and retry logic.
+     * <p>
+     * PURE: see {@link #wrapRunnable(String, Runnable)}.
      */
     private Runnable wrapRunnable(String taskName, Runnable delegate, RetryPolicy retryPolicy) {
-        Runnable wrapped = withRetry(instrument(taskName, delegate), retryPolicy, taskName);
+        return withRetry(instrument(taskName, delegate), retryPolicy, taskName);
+    }
+
+    /**
+     * Publishes the outermost wrapped runnable for resume catch-up replay.
+     * Called only after the corresponding schedule/entry swap succeeded.
+     */
+    private void publishInstrumented(String taskName, Runnable wrapped) {
         instrumentedRunnables.put(taskName, wrapped);
-        return wrapped;
     }
 
     /**

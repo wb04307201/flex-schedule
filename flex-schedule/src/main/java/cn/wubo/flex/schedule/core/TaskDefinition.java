@@ -11,8 +11,14 @@ import java.util.List;
  * Immutable definition of a scheduled task for persistence.
  * Contains all information needed to recreate a task after application restart.
  *
- * @param misfirePolicy     policy for handling missed executions of recurring tasks
- * @param misfireThreshold  lateness beyond which a fire is considered a misfire (must be positive)
+ * @param misfirePolicy     policy for handling missed executions of recurring tasks;
+ *                          {@code null} (together with a {@code null} threshold) means
+ *                          misfire handling is NOT configured — the task keeps the
+ *                          pre-1.3.0 behavior. This is the shape of 1.2.x-persisted
+ *                          payloads and must survive deserialization unchanged.
+ * @param misfireThreshold  lateness beyond which a fire is considered a misfire;
+ *                          must be positive when supplied. {@code null} means
+ *                          unconfigured (see {@code misfirePolicy}).
  */
 public record TaskDefinition(
         String taskName,
@@ -35,39 +41,50 @@ public record TaskDefinition(
 ) {
 
     /**
-     * Default misfire policy applied when none is configured: a late trigger
-     * fires normally, and a pause-gap catch-up runs at most one execution.
+     * Default misfire policy applied when a definition opts into misfire
+     * handling without choosing a policy explicitly.
      */
     public static final MisfirePolicy DEFAULT_MISFIRE_POLICY = MisfirePolicy.FIRE_ONCE;
 
     /**
-     * Default lateness threshold (30 seconds) beyond which a trigger is
-     * considered misfired.
+     * Default lateness threshold (30 seconds) applied when a definition opts
+     * into misfire handling without choosing a threshold explicitly.
      */
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(30);
 
     /**
-     * Compact constructor normalizing the misfire fields: a {@code null} policy
-     * falls back to {@link #DEFAULT_MISFIRE_POLICY} and a {@code null} threshold
-     * falls back to {@link #DEFAULT_MISFIRE_THRESHOLD} — 1.2.x-persisted payloads
-     * (e.g. JSON without either field, deserialized with nulls) must keep loading
-     * instead of failing the constructor and being skipped by restoreTasks().
-     * An explicitly supplied threshold must still be strictly positive.
+     * Compact constructor implementing the opt-in misfire contract:
+     * <ul>
+     *   <li>both misfire fields {@code null} — the shape of 1.2.x-persisted
+     *       payloads (JSON without either field, deserialized with nulls) — keeps
+     *       them {@code null}, meaning "misfire handling not configured". Such
+     *       definitions load fine and are restored by
+     *       {@code FlexScheduledTaskRegistrar.restoreTasks()} with pre-1.3.0
+     *       behavior (no late-fire detection, no pause-gap catch-up).</li>
+     *   <li>either field non-{@code null} — the definition opts in: a missing
+     *       side falls back to {@link #DEFAULT_MISFIRE_POLICY} /
+     *       {@link #DEFAULT_MISFIRE_THRESHOLD}, and an explicitly supplied
+     *       threshold must be strictly positive.</li>
+     * </ul>
      */
     public TaskDefinition {
-        if (misfirePolicy == null) {
-            misfirePolicy = DEFAULT_MISFIRE_POLICY;
+        if (misfirePolicy != null || misfireThreshold != null) {
+            if (misfirePolicy == null) {
+                misfirePolicy = DEFAULT_MISFIRE_POLICY;
+            }
+            if (misfireThreshold == null) {
+                misfireThreshold = DEFAULT_MISFIRE_THRESHOLD;
+            }
+            Assert.isTrue(misfireThreshold.compareTo(Duration.ZERO) > 0,
+                    "misfireThreshold must be positive, was " + misfireThreshold);
         }
-        if (misfireThreshold == null) {
-            misfireThreshold = DEFAULT_MISFIRE_THRESHOLD;
-        }
-        Assert.isTrue(misfireThreshold.compareTo(Duration.ZERO) > 0,
-                "misfireThreshold must be positive, was " + misfireThreshold);
     }
 
     /**
      * Backward-compatible 15-argument constructor retained for callers compiled
-     * against 1.2.x. Delegates with the default misfire settings.
+     * against 1.2.x. Delegates with both misfire fields {@code null} — callers
+     * from the pre-misfire era keep the pre-1.3.0 behavior (exempt), matching
+     * what 1.2.x semantics promised.
      */
     public TaskDefinition(
             String taskName,
@@ -88,7 +105,7 @@ public record TaskDefinition(
     ) {
         this(taskName, taskType, cronExpression, timezone, interval, initialDelay, delay,
                 retryPolicy, timeout, beanName, methodName, methodParams, paused, createdAt,
-                updatedAt, DEFAULT_MISFIRE_POLICY, DEFAULT_MISFIRE_THRESHOLD);
+                updatedAt, null, null);
     }
 
     /**
@@ -122,8 +139,8 @@ public record TaskDefinition(
             this.taskType = taskType;
             this.createdAt = Instant.now();
             this.updatedAt = Instant.now();
-            this.misfirePolicy = DEFAULT_MISFIRE_POLICY;
-            this.misfireThreshold = DEFAULT_MISFIRE_THRESHOLD;
+            // misfirePolicy / misfireThreshold stay null (= misfire handling not
+            // configured) unless the caller opts in explicitly.
         }
 
         public Builder cronExpression(String cronExpression) { this.cronExpression = cronExpression; return this; }
