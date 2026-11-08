@@ -13,8 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Verifies the {@code TaskBuilder.createdAt(Instant)} hook used by persistence-aware
- * consumers (e.g. spring-ai-loom-agent's ScheduleRestoreListener) to preserve a task's
- * logical lifetime across application restarts.
+ * consumers to preserve a task's logical lifetime across application restarts.
  *
  * <p>Without an explicit {@code createdAt}, the registrar stamps every freshly
  * scheduled task with {@code Instant.now()} — which resets the {@link TaskLimits}

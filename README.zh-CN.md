@@ -8,20 +8,20 @@
 
 ![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/flex-schedule-spring-boot-starter?style=flat-square)
 [![star](https://gitee.com/wb04307201/flex-schedule/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
-[![fork](https://gitee.com/wb04307201/flex-schedule/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
 [![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
-[![fork](https://img.shields.io/github/forks/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)  
-![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)
+[![star](https://gitcode.com/wb04307201/flex-schedule/star/badge.svg)](https://gitcode.com/wb04307201/flex-schedule/overview)
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-25+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-4+-green.svg)
 
 ---
 
-## 特性
+## 功能特性
 
 - **动态任务管理** — 运行时添加、取消、替换、暂停、恢复任务
 - **3 种调度模式** — Cron、FixedDelay、FixedRate
 - **时区支持** — Cron 任务可指定时区（`addCronTask(name, cron, ZoneId, runnable)`）
 - **一次性延迟任务** — 延迟执行一次后自动移除
 - **失败重试** — 固定间隔或指数退避，可配置最大延迟
+- **Misfire 处理** — 按任务可选启用的迟到触发检测与暂停补偿（`MisfirePolicy`：SKIP / FIRE_ONCE / FIRE_IMMEDIATELY）
 - **执行超时** — 自动中断超时任务
 - **任务依赖链** — 使用 `TaskChain` 构建器顺序执行任务
 - **执行历史** — 按任务记录的内存环形缓冲区
@@ -144,7 +144,9 @@ record TaskInfo(String taskName, String taskType, String schedule) {}
 
 record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
-                  boolean paused) {}
+                  boolean paused, MisfirePolicy misfirePolicy,
+                  Duration misfireThreshold) {}
+// misfirePolicy / misfireThreshold：未配置 misfire 处理时为 null
 ```
 
 ### 流式任务构建器
@@ -157,7 +159,7 @@ taskService.task("cleanup")
     .register(this::cleanup);
 ```
 
-通过 `cron`、`fixedDelay`、`fixedRate` 或 `oneShot` 选择且仅选择一种调度类型；`timezone`、`timeout`、`retry`、`createdAt` 等选项可按需组合。
+通过 `cron`、`fixedDelay`、`fixedRate` 或 `oneShot` 选择且仅选择一种调度类型；`timezone`、`timeout`、`retry`、`createdAt`、`misfirePolicy`、`misfireThreshold` 等选项可按需组合。
 
 ## 高级用法
 
@@ -224,18 +226,78 @@ taskService.isPaused("myTask");  // true
 taskService.resume("myTask");
 ```
 
+### Misfire 处理（迟到触发与暂停补偿）
+
+循环任务可以**按需选择开启** misfire 处理，覆盖两种情况：实际触发时间比预期晚超过
+`misfireThreshold`（线程池饥饿、GC 停顿、系统过载），以及暂停期间错过的触发。
+
+```java
+taskService.task("report")
+    .cron("0 0 * * * *")
+    .misfirePolicy(MisfirePolicy.FIRE_ONCE)      // 开启 misfire 处理
+    .misfireThreshold(Duration.ofSeconds(30))    // 迟到容忍阈值
+    .register(this::generateReport);
+
+// 也可以对已注册任务在运行时配置：
+taskService.setMisfireConfig("report", MisfirePolicy.SKIP, Duration.ofSeconds(10));
+```
+
+| 策略 | 迟到触发（> 阈值） | `resume()` 暂停补偿 |
+|------|---------------------|----------------------|
+| `SKIP` | 跳过本次执行 — 历史中记录 `MISFIRE_SKIPPED`，并上报 `recordMisfire` 指标 | 不补偿 |
+| `FIRE_ONCE` | 照常执行（记日志 + 计数） | 补偿一次 — 仅当暂停期间确实错过了触发 |
+| `FIRE_IMMEDIATELY` | 照常执行（记日志 + 计数） | 补偿 `min(missed, 10)` 次 |
+
+关键语义：
+
+- **按需开启**：从未配置过 misfire 的任务保持经典行为 — 不做迟到检测、不做暂停补偿。
+  从 1.2.x 持久化数据恢复的 `TaskDefinition`（两个 misfire 字段均为 `null`）同样豁免。
+  只设置 policy/threshold 之一时，另一侧回落到文档默认值（`FIRE_ONCE` / 30s）。
+- **任务执行耗时不算迟到**：期望触发基线与 Spring 实际调度下一次触发的方式一致 —
+  `FIXED_DELAY` 与 `CRON` 基于完成时间，`FIXED_RATE` 基于时间网格。
+- **补偿串行执行**，走完整的 instrument 管线（分布式锁、监听器、历史、指标），
+  且绝不会与同一任务的常规触发并发执行；补偿过程中重新暂停会中止剩余执行。
+- **重启恢复**：`restoreTasks()` 会重新应用持久化的 misfire 配置，但停机窗口本身
+  不做补偿 — 重启后第一次触发重新播种基线。
+- 一次性任务完全忽略 misfire 策略。
+- `GET /actuator/flexschedule/{name}` 会返回已配置的 `misfirePolicy` /
+  `misfireThreshold`（未配置时为 `null`）。
+
 ### 持久化
 
 flex-schedule **不提供持久化默认实现** — 调度核心是纯内存的（`InMemoryTaskRepository`）。
 需要任务跨重启存活时，由消费者自行提供 `TaskRepository` bean。
 
-**消费方通常的做法**：
+**两种触发形式，两种持久化姿势**：
 
-1. 用 JDBC、Redis 或同类存储把 `TaskDefinition`（含 `beanName`/`methodName`/`createdAt`）持久化。
-2. 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()`，它会读取 `TaskRepository.findAll()` 并按 `createdAt` 还原。非 bean-method 形式的触发器（如 lambda、prompt-driven），改用 `FlexScheduledTaskService.setCreatedAt(name, instant)`（或在 `register(...)` 之前用 `TaskBuilder.createdAt(Instant)`）把原始创建时间写回到内存条目上。
-3. 如果触发器不是 bean-method 反射形式（如 lambda、prompt-driven），可在 `TaskBuilder.register(...)` 之前调用 `TaskBuilder.createdAt(Instant)` 直接覆盖默认值（不需要走 `restoreTasks()`）。
+1. **bean-method 触发**（已持有 `TaskDefinition`）：
+   - 把 `TaskDefinition`（含 `beanName` / `methodName` / `createdAt`，以及可选的
+     `misfirePolicy` / `misfireThreshold`）持久化到自有的存储。两个 misfire 字段
+     均保持 `null` 时，还原后的任务豁免于 misfire 处理（1.3.0 之前的行为）；
+     持久化的值会由 `restoreTasks()` 重新应用。
+   - 应用启动时调用 `FlexScheduledTaskRegistrar.restoreTasks()` —— 它读取
+     `TaskRepository.findAll()` 并按持久化的 `createdAt` 还原每条记录。
 
-参考消费方 `spring-ai-loom-agent` 的 `ScheduleRestoreListener`，演示了 prompt-driven 调度如何通过 `TaskBuilder.createdAt(...)` + `ApplicationReadyEvent` 接管整个恢复生命周期。
+2. **lambda / prompt-driven 触发**（持有的是裸 runnable）：
+   - 把自己需要的信息持久化下来。
+   - 启动时通过 `TaskBuilder.createdAt(Instant)` **在** `.register(...)` **之前**
+     设置（或先 `register(...)`，再调 `FlexScheduledTaskService.setCreatedAt(name, instant)`），
+     让 `max-lifetime` 跨重启按原时刻继续计时。示例：
+
+   ```java
+   @Component
+   class ScheduleRestoreListener {
+       @EventListener(ApplicationReadyEvent.class)
+       void onReady(FlexScheduledTaskService svc, PromptTaskStore store) {
+           store.allOwnedTasks().forEach(rec ->
+               svc.task(rec.name())
+                  .cron(rec.cron())
+                  .createdAt(rec.createdAt())    // 保留原始 lifetime
+                  .register(() -> runPrompt(rec))
+           );
+       }
+   }
+   ```
 
 > 历史注意：早期版本曾自动装配一个 `JdbcTaskRepository`（H2）。该 bean 会创建 `flex_scheduled_task` 表但从不写入任何行 — 实际是死代码且会让高级用户误以为 H2 是推荐默认。已移除。
 
@@ -377,7 +439,7 @@ flex:
 
 ### Actuator 端点
 
-当 `spring-boot-starter-actuator` + `spring-boot-starter-web` 在 classpath 时启用。
+当 `spring-boot-starter-actuator` + `spring-boot-starter-webmvc` 在 classpath 时启用（Boot 4 将 `starter-web` 重命名为 `starter-webmvc`）。
 
 ```yaml
 management:

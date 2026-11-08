@@ -8,10 +8,9 @@
 
 ![Maven Central](https://img.shields.io/maven-central/v/io.github.wb04307201/flex-schedule-spring-boot-starter?style=flat-square)
 [![star](https://gitee.com/wb04307201/flex-schedule/badge/star.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
-[![fork](https://gitee.com/wb04307201/flex-schedule/badge/fork.svg?theme=dark)](https://gitee.com/wb04307201/flex-schedule)
 [![star](https://img.shields.io/github/stars/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)
-[![fork](https://img.shields.io/github/forks/wb04307201/flex-schedule)](https://github.com/wb04307201/flex-schedule)  
-![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-17+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-3+-green.svg)
+[![star](https://gitcode.com/wb04307201/flex-schedule/star/badge.svg)](https://gitcode.com/wb04307201/flex-schedule/overview)
+![License](https://img.shields.io/badge/License-Apache2.0-blue.svg) ![JDK](https://img.shields.io/badge/JDK-25+-green.svg) ![SpringBoot](https://img.shields.io/badge/Spring%20Boot-4+-green.svg)
 
 ---
 
@@ -22,6 +21,7 @@
 - **Timezone support** — Cron tasks with custom timezone (`addCronTask(name, cron, ZoneId, runnable)`)
 - **One-shot tasks** — Delayed single-execution with auto-removal
 - **Retry on failure** — Fixed or exponential backoff with configurable max delay
+- **Misfire handling** — Opt-in late-fire detection and pause-gap catch-up per task via `MisfirePolicy` (SKIP / FIRE_ONCE / FIRE_IMMEDIATELY)
 - **Execution timeout** — Automatically interrupt tasks that exceed their time limit
 - **Task dependency chains** — Sequential task execution with `TaskChain` builder
 - **Execution history** — In-memory ring buffer of execution records per task
@@ -144,7 +144,9 @@ record TaskInfo(String taskName, String taskType, String schedule) {}
 
 record TaskDetail(String taskName, String taskType, String schedule,
                   boolean oneShot, RetryPolicy retryPolicy, Instant createdAt,
-                  boolean paused) {}
+                  boolean paused, MisfirePolicy misfirePolicy,
+                  Duration misfireThreshold) {}
+// misfirePolicy / misfireThreshold: null when misfire handling is not configured
 ```
 
 ### Fluent Task Builder
@@ -157,7 +159,7 @@ taskService.task("cleanup")
     .register(this::cleanup);
 ```
 
-Choose exactly one scheduling type with `cron`, `fixedDelay`, `fixedRate`, or `oneShot`. Options such as `timezone`, `timeout`, `retry`, and `createdAt` can be composed where applicable.
+Choose exactly one scheduling type with `cron`, `fixedDelay`, `fixedRate`, or `oneShot`. Options such as `timezone`, `timeout`, `retry`, `createdAt`, `misfirePolicy`, and `misfireThreshold` can be composed where applicable.
 
 ## Advanced Usage
 
@@ -224,29 +226,86 @@ taskService.isPaused("myTask");  // true
 taskService.resume("myTask");
 ```
 
+### Misfire Handling (Late Fires & Pause-Gap Catch-Up)
+
+Recurring tasks can **opt in** to misfire handling, which covers two situations:
+a fire that starts more than `misfireThreshold` later than expected (thread-pool
+starvation, GC pause, system overload), and firings missed while the task was paused.
+
+```java
+taskService.task("report")
+    .cron("0 0 * * * *")
+    .misfirePolicy(MisfirePolicy.FIRE_ONCE)      // opt in
+    .misfireThreshold(Duration.ofSeconds(30))    // lateness tolerance
+    .register(this::generateReport);
+
+// Or configure an already-registered task at runtime:
+taskService.setMisfireConfig("report", MisfirePolicy.SKIP, Duration.ofSeconds(10));
+```
+
+| Policy | Late fire (> threshold) | Catch-up on `resume()` |
+|--------|-------------------------|------------------------|
+| `SKIP` | Skipped — recorded as `MISFIRE_SKIPPED` in history + `recordMisfire` metric | None |
+| `FIRE_ONCE` | Executes normally (logged + counted) | One execution — only if the pause gap actually missed a firing |
+| `FIRE_IMMEDIATELY` | Executes normally (logged + counted) | `min(missed, 10)` executions |
+
+Key semantics:
+
+- **Opt-in**: a task that never receives a misfire configuration keeps the classic
+  behavior — no late-fire detection, no catch-up. This includes tasks restored from
+  1.2.x-persisted `TaskDefinition`s (both misfire fields `null`). Setting only one of
+  policy/threshold fills the other from the documented defaults (`FIRE_ONCE` / 30s).
+- **Delegate runtime is never lateness**: the expected-fire baseline follows how Spring
+  actually schedules the next fire — completion-based for `FIXED_DELAY` and `CRON`,
+  grid-based for `FIXED_RATE`.
+- **Catch-up runs serially** through the full instrumented pipeline (distributed lock,
+  listeners, history, metrics) and never overlaps a regular fire of the same task.
+  Re-pausing during a burst aborts the remaining executions.
+- **Restore after restart**: persisted misfire settings are re-applied by
+  `restoreTasks()`, but the downtime gap itself is never compensated — the first fire
+  after restart re-seeds the baseline.
+- One-shot tasks ignore the misfire policy entirely.
+- `GET /actuator/flexschedule/{name}` reports the configured `misfirePolicy` /
+  `misfireThreshold` (`null` when the task is unconfigured).
+
 ### Persistence
 
 flex-schedule ships **no persistence default** — the scheduler core is pure in-memory
 (`InMemoryTaskRepository`). When tasks need to survive restarts, consumers provide their
 own `TaskRepository` bean.
 
-**Consumer-side recipe**:
+**Two trigger shapes, two ways to persist**:
 
-1. Persist `TaskDefinition` (including `beanName` / `methodName` / `createdAt`) to JDBC,
-   Redis, or a similar store.
-2. On application startup, call `FlexScheduledTaskRegistrar.restoreTasks()` — it reads
-   `TaskRepository.findAll()` and rehydrates each row honoring the persisted
-   `createdAt`. For non-bean-method triggers, instead use
-   `FlexScheduledTaskService.setCreatedAt(name, instant)` (or
-   `TaskBuilder.createdAt(Instant)` before `register(...)`) to stamp the
-   original creation time onto the in-memory entry.
-3. For non-bean-method triggers (lambda closures, prompt-driven work, etc.), skip
-   `restoreTasks()` and instead call `TaskBuilder.createdAt(Instant)` before
-   `register(...)` to override the default `Instant.now()` stamp.
+1. **Bean-method triggers** (you already have `TaskDefinition`):
+   - Persist `TaskDefinition` (including `beanName` / `methodName` / `createdAt`,
+     and optionally `misfirePolicy` / `misfireThreshold`) to your store. Keeping
+     both misfire fields `null` restores the task exempt from misfire handling
+     (pre-1.3.0 behavior); persisted values are re-applied by `restoreTasks()`.
+   - On startup, call `FlexScheduledTaskRegistrar.restoreTasks()` — it reads
+     `TaskRepository.findAll()` and rehydrates each row honoring the persisted
+     `createdAt`.
 
-`spring-ai-loom-agent` (a reference consumer) demonstrates the prompt-driven case:
-see `ScheduleRestoreListener`, which wires `TaskBuilder.createdAt(...)` + an
-`ApplicationReadyEvent` listener to own the entire restore lifecycle.
+2. **Lambda / prompt-driven triggers** (you have raw runnables only):
+   - Persist whatever you need.
+   - On startup, re-register via `TaskBuilder.createdAt(Instant)` *before*
+     `.register(...)` (or call `FlexScheduledTaskService.setCreatedAt(name, instant)`
+     *after* `register(...)`) so the `max-lifetime` ceiling keeps working across
+     restarts. Example:
+
+   ```java
+   @Component
+   class ScheduleRestoreListener {
+       @EventListener(ApplicationReadyEvent.class)
+       void onReady(FlexScheduledTaskService svc, PromptTaskStore store) {
+           store.allOwnedTasks().forEach(rec ->
+               svc.task(rec.name())
+                  .cron(rec.cron())
+                  .createdAt(rec.createdAt())    // preserve original lifetime
+                  .register(() -> runPrompt(rec))
+           );
+       }
+   }
+   ```
 
 > Historical note: earlier versions auto-registered a `JdbcTaskRepository` bean (H2).
 > It created a `flex_scheduled_task` table but never wrote any row — effectively dead
@@ -393,7 +452,7 @@ flex:
 
 ### Actuator Endpoint
 
-Active when `spring-boot-starter-actuator` + `spring-boot-starter-web` are on the classpath.
+Active when `spring-boot-starter-actuator` + `spring-boot-starter-webmvc` are on the classpath (Boot 4 renamed `starter-web` → `starter-webmvc`).
 
 ```yaml
 management:

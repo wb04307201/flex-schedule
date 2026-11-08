@@ -1,6 +1,7 @@
 package cn.wubo.flex.schedule.metrics;
 
 import cn.wubo.flex.schedule.core.MetricsRecorder;
+import cn.wubo.flex.schedule.core.MisfirePolicy;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -18,6 +19,7 @@ import java.util.function.Supplier;
  *   <li>{@code flex.schedule.task.executions} — counter with tags: taskName, taskType, result</li>
  *   <li>{@code flex.schedule.task.duration} — timer with tags: taskName, taskType</li>
  *   <li>{@code flex.schedule.active.tasks} — gauge for current active task count</li>
+ *   <li>{@code flex.schedule.misfire} — counter with tags: taskName, taskType, policy</li>
  * </ul>
  * <p>
  * Uses caching to avoid rebuilding Counter and Timer instances on every execution.
@@ -50,6 +52,18 @@ public class MicrometerMetricsRecorder implements MetricsRecorder {
                         .tag("taskType", taskType)
                         .register(meterRegistry));
         timer.record(duration);
+    }
+
+    @Override
+    public void recordMisfire(String taskName, String taskType, MisfirePolicy policy) {
+        String counterKey = taskName + "|" + taskType + "|misfire|" + policy;
+        Counter counter = counterCache.computeIfAbsent(counterKey, k ->
+                Counter.builder("flex.schedule.misfire")
+                        .tag("taskName", taskName)
+                        .tag("taskType", taskType)
+                        .tag("policy", policy != null ? policy.name() : "NONE")
+                        .register(meterRegistry));
+        counter.increment();
     }
 
     @Override

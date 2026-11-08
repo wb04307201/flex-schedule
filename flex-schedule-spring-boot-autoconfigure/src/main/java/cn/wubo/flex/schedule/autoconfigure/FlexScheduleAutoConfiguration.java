@@ -1,36 +1,42 @@
 package cn.wubo.flex.schedule.autoconfigure;
 
-import cn.wubo.flex.schedule.autoconfigure.endpoint.DefaultEndpointAccessControl;
-import cn.wubo.flex.schedule.autoconfigure.endpoint.FlexScheduleEndpoint;
-import cn.wubo.flex.schedule.autoconfigure.endpoint.EndpointAccessControl;
 import cn.wubo.flex.schedule.autoconfigure.FlexScheduleProperties;
 import cn.wubo.flex.schedule.core.DefaultFlexScheduledTaskService;
-import cn.wubo.flex.schedule.core.DistributedLock;
 import cn.wubo.flex.schedule.core.ExecutionHistory;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.InMemoryExecutionHistory;
-import cn.wubo.flex.schedule.core.MetricsRecorder;
 import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskLimits;
 import cn.wubo.flex.schedule.core.TaskRepository;
-import cn.wubo.flex.schedule.metrics.MicrometerMetricsRecorder;
-import io.micrometer.core.instrument.MeterRegistry;
-import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
-import org.springframework.boot.actuate.health.HealthIndicator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+/**
+ * Core flex-schedule auto-configuration. Declares the thread pool, registrar,
+ * service, default {@link ExecutionHistory}, {@link TaskLimits}, and Spring
+ * context utils beans.
+ *
+ * <p>The optional pieces split out into sibling top-level configurations so
+ * Spring Boot 4 can discover them through
+ * {@code META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports}
+ * — Boot 4 no longer pulls in nested static {@code @Configuration} classes that
+ * live under an outer {@code @AutoConfiguration}:</p>
+ * <ul>
+ *   <li>{@link FlexScheduleEndpointAutoConfiguration} — {@code /actuator/flexschedule}</li>
+ *   <li>{@link FlexScheduleMetricsAutoConfiguration} — Micrometer recorder + registrar</li>
+ *   <li>{@link FlexScheduleHealthAutoConfiguration} — health indicator</li>
+ *   <li>{@link FlexScheduleRedisLockAutoConfiguration} — Redis distributed lock</li>
+ * </ul>
+ */
 @Slf4j
 @AutoConfiguration
 @ConditionalOnClass(FlexScheduledTaskService.class)
@@ -111,90 +117,5 @@ public class FlexScheduleAutoConfiguration {
     @Bean(name = "flexScheduleSpringContextUtils")
     public SpringContextUtils springContextUtils() {
         return new SpringContextUtils();
-    }
-
-    /**
-     * Actuator endpoint auto-configuration. Only active when actuator is on the classpath.
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(Endpoint.class)
-    @ConditionalOnBean(FlexScheduledTaskService.class)
-    static class EndpointConfiguration {
-
-        @Bean
-        @ConditionalOnMissingBean(EndpointAccessControl.class)
-        public EndpointAccessControl flexScheduleEndpointAccessControl(FlexScheduleProperties properties) {
-            return new DefaultEndpointAccessControl(
-                    properties.getEndpoint().getWriteEnabled(),
-                    properties.getEndpoint().getAllowedBeans());
-        }
-
-        @Bean
-        @ConditionalOnMissingBean(FlexScheduleEndpoint.class)
-        public FlexScheduleEndpoint flexScheduleEndpoint(
-                FlexScheduledTaskService taskService,
-                EndpointAccessControl accessControl) {
-            return new FlexScheduleEndpoint(taskService, accessControl);
-        }
-    }
-
-    /**
-     * Micrometer metrics auto-configuration. Only active when Micrometer is on the classpath.
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(MeterRegistry.class)
-    @ConditionalOnBean(MeterRegistry.class)
-    static class MetricsConfiguration {
-
-        @Bean
-        @ConditionalOnMissingBean(MetricsRecorder.class)
-        public MetricsRecorder flexScheduleMetricsRecorder(MeterRegistry meterRegistry) {
-            return new MicrometerMetricsRecorder(meterRegistry);
-        }
-
-        @Bean
-        @ConditionalOnBean({FlexScheduledTaskRegistrar.class, MetricsRecorder.class})
-        public FlexScheduleMetricsRegistrar flexScheduleMetricsRegistrar(
-                FlexScheduledTaskRegistrar registrar,
-                MetricsRecorder metricsRecorder) {
-            return new FlexScheduleMetricsRegistrar(registrar, metricsRecorder);
-        }
-    }
-
-    /**
-     * Health indicator auto-configuration. Only active when Spring Boot Actuator is on the classpath.
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(HealthIndicator.class)
-    @ConditionalOnBean({FlexScheduledTaskRegistrar.class, ThreadPoolTaskScheduler.class})
-    static class HealthConfiguration {
-
-        @Bean
-        @ConditionalOnMissingBean(name = "flexScheduleHealthIndicator")
-        public FlexScheduleHealthIndicator flexScheduleHealthIndicator(
-                FlexScheduledTaskRegistrar registrar,
-                @Qualifier("flexScheduleThreadPoolTaskScheduler") ThreadPoolTaskScheduler taskScheduler) {
-            return new FlexScheduleHealthIndicator(registrar, taskScheduler);
-        }
-    }
-
-    /**
-     * Redis distributed lock auto-configuration.
-     * Only active when Spring Data Redis is on the classpath.
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(name = "org.springframework.data.redis.core.StringRedisTemplate")
-    @ConditionalOnBean(FlexScheduledTaskRegistrar.class)
-    static class RedisLockConfiguration {
-
-        @Bean
-        @ConditionalOnMissingBean(DistributedLock.class)
-        public DistributedLock redisDistributedLock(
-                org.springframework.data.redis.core.StringRedisTemplate redisTemplate,
-                FlexScheduledTaskRegistrar registrar) {
-            DistributedLock lock = new cn.wubo.flex.schedule.redis.RedisDistributedLock(redisTemplate);
-            registrar.setDistributedLock(lock);
-            return lock;
-        }
     }
 }

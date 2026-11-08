@@ -49,13 +49,16 @@
             <optional>true</optional>
         </dependency>
         <dependency>
-            <groupId>org.springframework</groupId>
-            <artifactId>spring-web</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-health</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- Boot 4 endpoint: @WriteOperation(@RequestBody ...) needs spring-web on the classpath.
+             Consumers that already pull spring-boot-starter-webmvc get this transitively;
+             marking optional=true keeps it out of consumers who only want the Schedule API. -->
         <dependency>
             <groupId>org.springframework</groupId>
-            <artifactId>spring-webmvc</artifactId>
+            <artifactId>spring-web</artifactId>
             <optional>true</optional>
         </dependency>
         <dependency>
@@ -75,13 +78,26 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
+                <version>3.14.0</version>
                 <configuration>
+                    <release>${java.version}</release>
+                    <!-- Boot 4 OperationMethodParameters requires -parameters so @Endpoint methods expose parameter names via Method.getParameters(). -->
+                    <parameters>true</parameters>
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>
                             <artifactId>lombok</artifactId>
                             <version>${lombok.version}</version>
+                        </path>
+                        <!-- Generates META-INF/spring-configuration-metadata.json so IDEs
+                             offer completion for every flex.schedule.* property (including
+                             the limits.* group). Must be listed AFTER lombok. This module
+                             overrides the parent compiler config, so the processor must be
+                             declared here too. -->
+                        <path>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-configuration-processor</artifactId>
+                            <version>${spring-boot.version}</version>
                         </path>
                     </annotationProcessorPaths>
                 </configuration>

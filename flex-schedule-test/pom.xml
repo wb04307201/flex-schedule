@@ -31,7 +31,25 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Boot 4 moved MockMvc web-test auto-configuration (@AutoConfigureMockMvc) out of
+             spring-boot-starter-test into spring-boot-webmvc-test; required by the endpoint
+             HTTP-layer tests (Task 7, scenario D5). Test scope only. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.wb04307201</groupId>
+            <artifactId>flex-schedule-redis</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

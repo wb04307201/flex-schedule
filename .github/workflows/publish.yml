@@ -14,11 +14,12 @@ jobs:
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '25'
           distribution: 'temurin'
           cache: maven
-            
-      # ✅ 新增：动态生成 settings.xml，注入 Central 认证
+
+      # Create Maven settings.xml with Central credentials (no GPG key
+      # imported yet — GPG setup happens in the next step).
       - name: Create Maven settings.xml
         run: |
           mkdir -p ~/.m2
@@ -39,6 +40,8 @@ jobs:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
 
+      # Import the GPG signing key. Last import was Sept 2026; if rotated,
+      # update the secret value at https://github.com/.../settings/secrets.
       - name: Import GPG Key
         uses: crazy-max/ghaction-import-gpg@v6
         with:
@@ -57,7 +60,6 @@ jobs:
       - name: Publish to Central
         run: mvn -B clean deploy -pl '!flex-schedule-test'
         env:
-          # GPG 密码
+          # GPG passphrase is needed at signing time and consumed by the
+          # settings.xml/gpg.conf created during the gpg-import step.
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-
-

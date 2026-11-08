@@ -57,6 +57,7 @@ public class BeanMethodRunnable implements Runnable {
             // Resolve the actual target class, unwrapping any AOP proxy
             Class<?> targetClass = AopUtils.getTargetClass(target);
             Method method = getOrResolveMethod(targetClass);
+            method = makeInvocableOn(method, target);
             method.setAccessible(true);
             if (methodParams.isEmpty()) {
                 method.invoke(target);
@@ -66,6 +67,23 @@ public class BeanMethodRunnable implements Runnable {
         } catch (NoSuchMethodException | InvocationTargetException | IllegalAccessException e) {
             throw new BeanMethodRunnableException(e.getMessage(), e);
         }
+    }
+
+    /**
+     * Returns a method handle that {@code target} can actually receive.
+     * <p>
+     * A JDK dynamic proxy is NOT an instance of the AOP target class returned by
+     * {@link AopUtils#getTargetClass(Object)} — it only "is" its interfaces — so invoking a
+     * target-class method handle on it fails with {@link IllegalArgumentException}. In that
+     * case the same public signature is re-resolved on the proxy class itself, which keeps
+     * the call routed through the proxy so AOP advice (e.g. {@code @Transactional}) still runs.
+     * CGLIB proxies and plain beans pass the {@code isInstance} check untouched.
+     */
+    private static Method makeInvocableOn(Method method, Object target) throws NoSuchMethodException {
+        if (method.getDeclaringClass().isInstance(target)) {
+            return method;
+        }
+        return target.getClass().getMethod(method.getName(), method.getParameterTypes());
     }
 
     private Method getOrResolveMethod(Class<?> clazz) throws NoSuchMethodException {

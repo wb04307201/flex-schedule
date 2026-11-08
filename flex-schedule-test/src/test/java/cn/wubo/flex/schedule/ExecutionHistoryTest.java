@@ -97,6 +97,35 @@ class ExecutionHistoryTest {
         assertTrue(all.stream().anyMatch(r -> r.taskName().equals("task2")));
     }
 
+    // ─── A15: getAllHistory cross-task ordering by startTime DESC ─────
+
+    @Test
+    void getAllHistory_ordersAcrossTasksByStartTimeDescending() {
+        InMemoryExecutionHistory store = new InMemoryExecutionHistory(10);
+        java.time.Instant base = java.time.Instant.parse("2026-01-01T00:00:00Z");
+
+        // Interleave tasks and insert deliberately out of chronological order.
+        store.record(new ExecutionRecord("taskA", "CRON", base.plusSeconds(1), Duration.ofMillis(10), true, null));
+        store.record(new ExecutionRecord("taskB", "FIXED_RATE", base.plusSeconds(3), Duration.ofMillis(10), true, null));
+        store.record(new ExecutionRecord("taskA", "CRON", base.minusSeconds(2), Duration.ofMillis(10), false, "boom"));
+        store.record(new ExecutionRecord("taskC", "ONE_SHOT", base.plusSeconds(2), Duration.ofMillis(10), true, null));
+
+        List<ExecutionRecord> all = store.getAllHistory(100);
+        assertEquals(4, all.size());
+        assertEquals(
+                List.of(base.plusSeconds(3), base.plusSeconds(2), base.plusSeconds(1), base.minusSeconds(2)),
+                all.stream().map(ExecutionRecord::startTime).toList(),
+                "getAllHistory must sort across tasks newest-first by startTime");
+        assertEquals(List.of("taskB", "taskC", "taskA", "taskA"),
+                all.stream().map(ExecutionRecord::taskName).toList());
+
+        // limit keeps the newest prefix of the global ordering
+        List<ExecutionRecord> top2 = store.getAllHistory(2);
+        assertEquals(2, top2.size());
+        assertEquals(base.plusSeconds(3), top2.get(0).startTime());
+        assertEquals(base.plusSeconds(2), top2.get(1).startTime());
+    }
+
     @Test
     void clear_specificTask_removesOnlyThatTask() throws InterruptedException {
         CountDownLatch latch1 = new CountDownLatch(1);

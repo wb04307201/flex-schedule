@@ -148,4 +148,27 @@ class MicrometerMetricsRecorderTest {
         assertEquals(7.0, gauge.value(),
             "Gauge must poll the supplier each time it's read, not capture a snapshot");
     }
+
+    // ─── misfire counter (1.3.0) ────────────────────────────────────────
+
+    @Test
+    void recordMisfire_shouldIncrementCounterWithPolicyTag() {
+        recorder.recordMisfire("taskM", "FIXED_DELAY", cn.wubo.flex.schedule.core.MisfirePolicy.SKIP);
+        recorder.recordMisfire("taskM", "FIXED_DELAY", cn.wubo.flex.schedule.core.MisfirePolicy.SKIP);
+        recorder.recordMisfire("taskM", "FIXED_DELAY", cn.wubo.flex.schedule.core.MisfirePolicy.FIRE_ONCE);
+
+        Counter skipCounter = registry.find("flex.schedule.misfire")
+                .tag("taskName", "taskM")
+                .tag("taskType", "FIXED_DELAY")
+                .tag("policy", "SKIP")
+                .counter();
+        assertNotNull(skipCounter);
+        assertEquals(2.0, skipCounter.count());
+
+        Counter fireOnceCounter = registry.find("flex.schedule.misfire")
+                .tag("policy", "FIRE_ONCE")
+                .counter();
+        assertNotNull(fireOnceCounter);
+        assertEquals(1.0, fireOnceCounter.count());
+    }
 }

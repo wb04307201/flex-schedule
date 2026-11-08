@@ -4,6 +4,7 @@ import cn.wubo.flex.schedule.core.BeanMethodRunnable;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.TaskDetail;
 import cn.wubo.flex.schedule.core.TaskInfo;
+import org.jspecify.annotations.Nullable;
 import org.springframework.boot.actuate.endpoint.annotation.*;
 import org.springframework.util.Assert;
 
@@ -50,8 +51,7 @@ public class FlexScheduleEndpoint {
 
     @WriteOperation
     public Object addTask(String taskName, String taskType, String beanName, String methodName,
-                         String cron, Long intervalSeconds, Long initialDelaySeconds,
-                         List<Object> methodParams) {
+                         @Nullable String cron, @Nullable Long intervalSeconds, @Nullable Long initialDelaySeconds) {
         if (!accessControl.canAddTask(beanName, methodName)) {
             return Map.of("error", "Write operations are not enabled or bean is not in the allowlist");
         }
@@ -64,7 +64,54 @@ public class FlexScheduleEndpoint {
         request.setCron(cron);
         request.setIntervalSeconds(intervalSeconds);
         request.setInitialDelaySeconds(initialDelaySeconds);
+
+        try {
+            validateRequest(request);
+        } catch (IllegalArgumentException e) {
+            return Map.of("error", e.getMessage());
+        }
+
+        Runnable runnable = new BeanMethodRunnable(beanName, methodName);
+
+        try {
+            long initialDelay = initialDelaySeconds != null ? initialDelaySeconds : 0L;
+            switch (taskType.toUpperCase()) {
+                case "CRON" -> taskService.add(taskName, cron, runnable);
+                case "FIXED_DELAY" -> taskService.addFixedDelayTask(taskName, intervalSeconds, initialDelay, runnable);
+                case "FIXED_RATE" -> taskService.addFixedRateTask(taskName, intervalSeconds, initialDelay, runnable);
+                default -> {
+                    return Map.of("error", "Unknown taskType: " + taskType);
+                }
+            }
+        } catch (Exception e) {
+            return Map.of("error", e.getMessage());
+        }
+
+        return Map.of("status", "added", "taskName", taskName);
+    }
+
+    /**
+     * Java API for adding a task with optional reflective method parameters.
+     * Method-parameter support is not exposed on the actuator endpoint because
+     * {@code @WriteOperation} only supports simple-typed parameters; use this
+     * overload for in-process callers and tests that need to pass arguments.
+     */
+    public Object addTask(String taskName, String taskType, String beanName, String methodName,
+                         String cron, Long intervalSeconds, Long initialDelaySeconds,
+                         List<Object> methodParams) {
+        AddTaskRequest request = new AddTaskRequest();
+        request.setTaskName(taskName);
+        request.setTaskType(taskType);
+        request.setBeanName(beanName);
+        request.setMethodName(methodName);
+        request.setCron(cron);
+        request.setIntervalSeconds(intervalSeconds);
+        request.setInitialDelaySeconds(initialDelaySeconds);
         request.setMethodParams(methodParams);
+
+        if (!accessControl.canAddTask(beanName, methodName)) {
+            return Map.of("error", "Write operations are not enabled or bean is not in the allowlist");
+        }
 
         try {
             validateRequest(request);
@@ -110,7 +157,28 @@ public class FlexScheduleEndpoint {
     }
 
     @WriteOperation
-    public Object pauseTask(@Selector(match = Selector.Match.ALL_REMAINING) String taskToPause) {
+    public Object updateTask(@Selector String name, @Nullable String action) {
+        if (!accessControl.canCancelTask(name)) {
+            return Map.of("error", "Write operations are not enabled");
+        }
+        if (action == null) {
+            return Map.of("error", "action is required: pause | resume");
+        }
+        switch (action.toLowerCase()) {
+            case "pause":
+                return pauseTask(name);
+            case "resume":
+                return resumeTask(name);
+            default:
+                return Map.of("error", "Unknown action: " + action);
+        }
+    }
+
+    /**
+     * Pauses a scheduled task. Plain Java method — also reused as the body of the
+     * {@code POST /flexschedule/{name}} endpoint when {@code action=pause} is supplied.
+     */
+    public Object pauseTask(String taskToPause) {
         if (!accessControl.canCancelTask(taskToPause)) {
             return Map.of("error", "Write operations are not enabled");
         }
@@ -122,8 +190,11 @@ public class FlexScheduleEndpoint {
         return Map.of("status", "paused", "taskName", taskToPause);
     }
 
-    @WriteOperation
-    public Object resumeTask(@Selector(match = Selector.Match.ALL_REMAINING) String taskToResume) {
+    /**
+     * Resumes a paused task. Plain Java method — also reused as the body of the
+     * {@code POST /flexschedule/{name}} endpoint when {@code action=resume} is supplied.
+     */
+    public Object resumeTask(String taskToResume) {
         if (!accessControl.canCancelTask(taskToResume)) {
             return Map.of("error", "Write operations are not enabled");
         }

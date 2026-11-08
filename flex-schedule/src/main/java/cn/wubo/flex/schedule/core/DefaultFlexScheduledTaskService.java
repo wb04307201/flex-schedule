@@ -153,6 +153,11 @@ public class DefaultFlexScheduledTaskService implements FlexScheduledTaskService
         flexScheduledTaskRegistrar.setCreatedAt(taskName, createdAt);
     }
 
+    @Override
+    public void setMisfireConfig(String taskName, MisfirePolicy policy, Duration threshold) {
+        flexScheduledTaskRegistrar.setMisfireConfig(taskName, policy, threshold);
+    }
+
     // ─── Query ────────────────────────────────────────────────────────
 
     @Override

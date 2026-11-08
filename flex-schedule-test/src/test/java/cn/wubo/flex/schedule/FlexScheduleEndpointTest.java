@@ -1,21 +1,27 @@
 package cn.wubo.flex.schedule;
 
+import cn.wubo.flex.schedule.autoconfigure.endpoint.AddTaskRequest;
 import cn.wubo.flex.schedule.autoconfigure.endpoint.DefaultEndpointAccessControl;
 import cn.wubo.flex.schedule.autoconfigure.endpoint.FlexScheduleEndpoint;
 import cn.wubo.flex.schedule.autoconfigure.endpoint.EndpointAccessControl;
 import cn.wubo.flex.schedule.core.DefaultFlexScheduledTaskService;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskRegistrar;
 import cn.wubo.flex.schedule.core.FlexScheduledTaskService;
+import cn.wubo.flex.schedule.core.SpringContextUtils;
 import cn.wubo.flex.schedule.core.TaskDetail;
 import cn.wubo.flex.schedule.core.TaskInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.support.StaticApplicationContext;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -408,34 +414,427 @@ class FlexScheduleEndpointTest {
     }
 
     @Test
-    void addTask_withMethodParams_propagatesParams() {
-        // The endpoint must route to BeanMethodRunnable(beanName, methodName, methodParams)
-        // when methodParams is non-empty. Verify via side-effect: call a method that takes
-        // a String param, and observe the captured arg.
-        java.util.concurrent.atomic.AtomicReference<Object> captured = new java.util.concurrent.atomic.AtomicReference<>();
-        org.springframework.context.support.StaticApplicationContext ctx =
-            new org.springframework.context.support.StaticApplicationContext();
-        ctx.getBeanFactory().registerSingleton("paramBean", new ParamSink(captured));
+    void addTask_withMethodParams_propagatesParams() throws Exception {
+        // D4: real methodParams propagation — the target bean method records the arguments
+        // it actually receives. A FIXED_DELAY task with a 1s interval (the smallest positive
+        // value the endpoint's seconds-based API allows) and zero initial delay fires almost
+        // immediately on the scheduler thread; we await the recorded invocation instead of
+        // sleeping a fixed amount, so the assertion is timing-tolerant on slow CI.
+        StaticApplicationContext ctx = new StaticApplicationContext();
+        ParamSink sink = new ParamSink();
+        ctx.getBeanFactory().registerSingleton("paramBean", sink);
         ctx.refresh();
-        cn.wubo.flex.schedule.core.SpringContextUtils utils = new cn.wubo.flex.schedule.core.SpringContextUtils();
-        utils.setApplicationContext(ctx);
-        try {
-            Object result = endpoint.addTask("withParams", "CRON", "paramBean", "accept",
-                    "0 * * * * *", null, null, java.util.List.of("hello"));
 
-            // Scheduling succeeds (or fails on access-control, neither should pass empty params).
-            // Either way, the params path runs and is exercised.
-            // We don't assert the success map here because the cron never fires during the test;
-            // we just ensure no NPE was thrown on the params branch.
-            assertNotNull(result);
+        // SpringContextUtils caches the context set-once semantics; force the swap via
+        // reflection so this test does not depend on execution order relative to other
+        // classes (same disclosure pattern as TaskLimitsAutoConfigTest), and restore after.
+        Field field = SpringContextUtils.class.getDeclaredField("applicationContext");
+        field.setAccessible(true);
+        Object previous = field.get(null);
+        field.set(null, ctx);
+        try {
+            Object result = endpoint.addTask("withParams", "FIXED_DELAY", "paramBean", "accept",
+                    null, 1L, 0L, List.of("hello", 42));
+
+            assertInstanceOf(Map.class, result);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) result;
+            assertEquals("added", map.get("status"));
+
+            assertTrue(sink.awaitFirst(10_000), "target bean method was never invoked within 10s");
+            assertEquals(List.of("hello", 42), sink.received.get(0),
+                "sink must receive exactly the requested parameter values, in order");
         } finally {
+            try { service.cancel("withParams"); } catch (RuntimeException ignored) {}
+            field.set(null, previous);
+            try { ctx.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    void addTask_withEmptyMethodParams_fallsBackToNoArgConstructorAndStillInvokes() throws Exception {
+        // The 8-arg overload branches on methodParams.isEmpty(): empty list must route to
+        // BeanMethodRunnable(beanName, methodName) and invoke the no-arg target method.
+        StaticApplicationContext ctx = new StaticApplicationContext();
+        ParamSink sink = new ParamSink();
+        ctx.getBeanFactory().registerSingleton("paramBean", sink);
+        ctx.refresh();
+
+        Field field = SpringContextUtils.class.getDeclaredField("applicationContext");
+        field.setAccessible(true);
+        Object previous = field.get(null);
+        field.set(null, ctx);
+        try {
+            Object result = endpoint.addTask("noParams", "FIXED_DELAY", "paramBean", "ping",
+                    null, 1L, 0L, List.of());
+
+            assertInstanceOf(Map.class, result);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) result;
+            assertEquals("added", map.get("status"));
+
+            assertTrue(sink.awaitPing(10_000), "no-arg target method was never invoked within 10s");
+            assertTrue(sink.pings > 0);
+        } finally {
+            try { service.cancel("noParams"); } catch (RuntimeException ignored) {}
+            field.set(null, previous);
             try { ctx.close(); } catch (Exception ignored) {}
         }
     }
 
     public static class ParamSink {
-        private final java.util.concurrent.atomic.AtomicReference<Object> sink;
-        public ParamSink(java.util.concurrent.atomic.AtomicReference<Object> sink) { this.sink = sink; }
-        public void accept(String value) { sink.set(value); }
+        final List<List<Object>> received = new CopyOnWriteArrayList<>();
+        private final java.util.concurrent.CountDownLatch first = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch pinged = new java.util.concurrent.CountDownLatch(1);
+        volatile int pings;
+
+        public void accept(String value, Integer count) {
+            received.add(List.of(value, count));
+            first.countDown();
+        }
+
+        public void ping() {
+            pings++;
+            pinged.countDown();
+        }
+
+        boolean awaitFirst(long timeoutMillis) throws InterruptedException {
+            return first.await(timeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+
+        boolean awaitPing(long timeoutMillis) throws InterruptedException {
+            return pinged.await(timeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+    }
+
+    // ─── D1: 7-arg @WriteOperation addTask (no methodParams) ─────────────
+
+    @Test
+    void writeOperationAddTask_cronSuccess_returnsAdded() {
+        // Yearly cron (Jan 1) so the delegate never fires during the test window.
+        Object result = endpoint.addTask("w-cron", "CRON", "wBean", "wMethod",
+                "0 0 0 1 1 ?", null, null);
+
+        assertInstanceOf(Map.class, result);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertEquals("added", map.get("status"));
+        assertEquals("w-cron", map.get("taskName"));
+        assertTrue(service.exists("w-cron"));
+    }
+
+    @Test
+    void writeOperationAddTask_missingTaskName_returnsError() {
+        Object result = endpoint.addTask(null, "CRON", "wBean", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertEquals("taskName is required", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_missingTaskType_returnsError() {
+        Object result = endpoint.addTask("w-t", null, "wBean", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertEquals("taskType is required", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_missingBeanName_returnsError() {
+        Object result = endpoint.addTask("w-t", "CRON", "", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertEquals("beanName is required", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_missingMethodName_returnsError() {
+        Object result = endpoint.addTask("w-t", "CRON", "wBean", " ", "0 0 0 1 1 ?", null, null);
+        assertEquals("methodName is required", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_cronWithoutExpression_returnsError() {
+        Object result = endpoint.addTask("w-t", "CRON", "wBean", "wMethod", null, null, null);
+        assertEquals("cron is required for CRON tasks", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_fixedDelayMissingInterval_returnsError() {
+        Object result = endpoint.addTask("w-t", "FIXED_DELAY", "wBean", "wMethod", null, null, null);
+        assertEquals("intervalSeconds is required for FIXED_DELAY/FIXED_RATE tasks", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_fixedDelayZeroInterval_returnsError() {
+        Object result = endpoint.addTask("w-t", "FIXED_DELAY", "wBean", "wMethod", null, 0L, null);
+        assertEquals("intervalSeconds must be positive", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_fixedDelayNegativeInterval_returnsError() {
+        Object result = endpoint.addTask("w-t", "FIXED_DELAY", "wBean", "wMethod", null, -1L, 0L);
+        assertEquals("intervalSeconds must be positive", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_unknownTaskType_returnsError() {
+        Object result = endpoint.addTask("w-t", "WIBBLE", "wBean", "wMethod", null, null, null);
+        assertEquals("Unknown taskType: WIBBLE. Must be CRON, FIXED_DELAY, or FIXED_RATE", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_writeDisabled_returnsForbidden() {
+        FlexScheduleEndpoint restricted =
+            new FlexScheduleEndpoint(service, new DefaultEndpointAccessControl(false, Set.of()));
+
+        Object result = restricted.addTask("w-t", "CRON", "wBean", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertEquals("Write operations are not enabled or bean is not in the allowlist", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_beanNotInAllowlist_returnsForbidden() {
+        FlexScheduleEndpoint restricted =
+            new FlexScheduleEndpoint(service, new DefaultEndpointAccessControl(true, Set.of("otherBean")));
+
+        Object result = restricted.addTask("w-t", "CRON", "wBean", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertEquals("Write operations are not enabled or bean is not in the allowlist", errorOf(result));
+    }
+
+    @Test
+    void writeOperationAddTask_duplicateTaskName_returnsRegistrarError() {
+        service.add("w-dup", "0 0 0 1 1 ?", () -> {});
+
+        Object result = endpoint.addTask("w-dup", "CRON", "wBean", "wMethod", "0 0 0 1 1 ?", null, null);
+        assertTrue(errorOf(result).contains("w-dup"),
+            "duplicate registration error must surface the task name, was: " + errorOf(result));
+    }
+
+    // ─── D2: updateTask(name, action) full branch matrix ───────────────────
+
+    @Test
+    void updateTask_pause_returnsPausedAndPausesRegistrar() {
+        service.addFixedDelayTask("u-p", 3600, 0, () -> {});
+
+        Object result = endpoint.updateTask("u-p", "pause");
+
+        assertInstanceOf(Map.class, result);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = (Map<String, Object>) result;
+        assertEquals("paused", map.get("status"));
+        assertEquals("u-p", map.get("taskName"));
+        assertTrue(registrar.isPaused("u-p"));
+    }
+
+    @Test
+    void updateTask_pauseIsCaseInsensitive() {
+        service.addFixedDelayTask("u-c", 3600, 0, () -> {});
+
+        Object result = endpoint.updateTask("u-c", "PAUSE");
+
+        assertEquals("paused", asMap(result).get("status"));
+        assertTrue(registrar.isPaused("u-c"));
+    }
+
+    @Test
+    void updateTask_resume_returnsResumedAndUnpausesRegistrar() {
+        service.addFixedDelayTask("u-r", 3600, 0, () -> {});
+        service.pause("u-r");
+        assertTrue(registrar.isPaused("u-r"));
+
+        Object result = endpoint.updateTask("u-r", "resume");
+
+        assertEquals("resumed", asMap(result).get("status"));
+        assertEquals("u-r", asMap(result).get("taskName"));
+        assertFalse(registrar.isPaused("u-r"));
+    }
+
+    @Test
+    void updateTask_nullAction_returnsRequiredError() {
+        service.addFixedDelayTask("u-n", 3600, 0, () -> {});
+
+        Object result = endpoint.updateTask("u-n", null);
+
+        assertEquals("action is required: pause | resume", errorOf(result));
+        assertFalse(registrar.isPaused("u-n"));
+    }
+
+    @Test
+    void updateTask_unknownAction_returnsError() {
+        service.addFixedDelayTask("u-u", 3600, 0, () -> {});
+
+        Object result = endpoint.updateTask("u-u", "wiggle");
+
+        assertEquals("Unknown action: wiggle", errorOf(result));
+        assertFalse(registrar.isPaused("u-u"));
+    }
+
+    @Test
+    void updateTask_writeDisabled_returnsForbiddenWithoutPausing() {
+        service.addFixedDelayTask("u-d", 3600, 0, () -> {});
+        FlexScheduleEndpoint restricted =
+            new FlexScheduleEndpoint(service, new DefaultEndpointAccessControl(false, Set.of()));
+
+        Object result = restricted.updateTask("u-d", "pause");
+
+        assertEquals("Write operations are not enabled", errorOf(result));
+        assertFalse(registrar.isPaused("u-d"));
+    }
+
+    @Test
+    void updateTask_taskNotFound_returnsNotFoundError() {
+        Object result = endpoint.updateTask("u-ghost", "pause");
+
+        assertEquals("Task [u-ghost] not found", errorOf(result));
+    }
+
+    @Test
+    void updateTask_resumeNonexistent_returnsNotFoundError() {
+        Object result = endpoint.updateTask("u-ghost2", "resume");
+
+        assertEquals("Task [u-ghost2] not found", errorOf(result));
+    }
+
+    // ─── D3: FIXED_RATE branches ───────────────────────────────────────────
+
+    @Test
+    void addTask_fixedRate_success_returnsAdded() {
+        // 3600s initial delay keeps the first fire outside the test window (the
+        // unresolvable bean name would otherwise throw on an immediate execution).
+        Object result = endpoint.addTask("fr-1", "FIXED_RATE", "frBean", "frMethod",
+                null, 3600L, 3600L, null);
+
+        assertEquals("added", asMap(result).get("status"));
+        assertEquals("fr-1", asMap(result).get("taskName"));
+        assertTrue(service.exists("fr-1"));
+        assertEquals("FIXED_RATE", service.getTaskDetail("fr-1").orElseThrow().taskType());
+    }
+
+    @Test
+    void addTask_fixedRate_negativeInterval_returnsError() {
+        Object result = endpoint.addTask("fr-2", "FIXED_RATE", "frBean", "frMethod",
+                null, -1L, 0L, null);
+
+        assertEquals("intervalSeconds must be positive", errorOf(result));
+    }
+
+    @Test
+    void addTask_fixedRate_blankMethodName_returnsError() {
+        Object result = endpoint.addTask("fr-3", "FIXED_RATE", "frBean", "   ",
+                null, 10L, 0L, null);
+
+        assertEquals("methodName is required", errorOf(result));
+    }
+
+    @Test
+    void addTask_fixedRate_missingMethodName_returnsError() {
+        Object result = endpoint.addTask("fr-4", "FIXED_RATE", "frBean", null,
+                null, 10L, 0L, null);
+
+        assertEquals("methodName is required", errorOf(result));
+    }
+
+    // ─── helpers ───────────────────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Object result) {
+        assertInstanceOf(Map.class, result);
+        return (Map<String, Object>) result;
+    }
+
+    private static String errorOf(Object result) {
+        Object error = asMap(result).get("error");
+        assertNotNull(error, "expected an error entry but got: " + result);
+        return error.toString();
+    }
+
+    // ─── D6: DefaultEndpointAccessControl contract (dedicated) ─────────────
+
+    @Nested
+    class DefaultEndpointAccessControlContract {
+
+        @Test
+        void writeDisabled_deniesAddAndCancel() {
+            DefaultEndpointAccessControl control = new DefaultEndpointAccessControl(false, Set.of());
+
+            assertFalse(control.canAddTask("anyBean", "anyMethod"));
+            assertFalse(control.canCancelTask("anyTask"));
+        }
+
+        @Test
+        void writeEnabledWithEmptyAllowlist_admitsEverything() {
+            DefaultEndpointAccessControl control = new DefaultEndpointAccessControl(true, Set.of());
+
+            assertTrue(control.canAddTask("anyBean", "anyMethod"));
+            assertTrue(control.canAddTask("otherBean", "otherMethod"));
+            assertTrue(control.canCancelTask("anyTask"));
+        }
+
+        @Test
+        void nonEmptyAllowlist_gatesAddOnly_byBeanName() {
+            DefaultEndpointAccessControl control =
+                new DefaultEndpointAccessControl(true, Set.of("allowedBean"));
+
+            assertTrue(control.canAddTask("allowedBean", "anyMethod"), "listed bean must pass");
+            assertFalse(control.canAddTask("otherBean", "anyMethod"), "unlisted bean must be denied");
+            // methodName is never part of the allowlist decision
+            assertFalse(control.canAddTask("otherBean", "allowedBean"));
+            // canCancelTask ignores the allowlist — write-enabled alone unlocks it
+            assertTrue(control.canCancelTask("whatever"));
+        }
+
+        @Test
+        void nullAllowedBeans_treatedAsEmpty_noNpe() {
+            DefaultEndpointAccessControl control = new DefaultEndpointAccessControl(true, null);
+
+            assertTrue(control.canAddTask("anyBean", "anyMethod"));
+            assertTrue(control.canCancelTask("anyTask"));
+        }
+
+        @Test
+        void nullAllowedBeansWithWriteDisabled_stillDenies_noNpe() {
+            DefaultEndpointAccessControl control = new DefaultEndpointAccessControl(false, null);
+
+            assertFalse(control.canAddTask("anyBean", "anyMethod"));
+            assertFalse(control.canCancelTask("anyTask"));
+        }
+    }
+
+    // ─── D7: AddTaskRequest round-trip ─────────────────────────────────────
+
+    @Nested
+    class AddTaskRequestRoundTrip {
+
+        @Test
+        void allFields_roundTrip() {
+            List<Object> params = List.of("a", 1, true);
+            AddTaskRequest request = new AddTaskRequest();
+            request.setTaskName("t1");
+            request.setTaskType("CRON");
+            request.setCron("0 * * * * *");
+            request.setIntervalSeconds(60L);
+            request.setInitialDelaySeconds(5L);
+            request.setBeanName("demoBean");
+            request.setMethodName("demoMethod");
+            request.setMethodParams(params);
+
+            assertEquals("t1", request.getTaskName());
+            assertEquals("CRON", request.getTaskType());
+            assertEquals("0 * * * * *", request.getCron());
+            assertEquals(60L, request.getIntervalSeconds());
+            assertEquals(5L, request.getInitialDelaySeconds());
+            assertEquals("demoBean", request.getBeanName());
+            assertEquals("demoMethod", request.getMethodName());
+            assertSame(params, request.getMethodParams());
+            assertEquals(List.of("a", 1, true), request.getMethodParams());
+        }
+
+        @Test
+        void freshInstance_allFieldsNull() {
+            AddTaskRequest request = new AddTaskRequest();
+
+            assertNull(request.getTaskName());
+            assertNull(request.getTaskType());
+            assertNull(request.getCron());
+            assertNull(request.getIntervalSeconds());
+            assertNull(request.getInitialDelaySeconds());
+            assertNull(request.getBeanName());
+            assertNull(request.getMethodName());
+            assertNull(request.getMethodParams());
+        }
     }
 }

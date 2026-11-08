@@ -103,6 +103,34 @@ public interface FlexScheduledTaskService {
      */
     void setCreatedAt(String taskName, Instant createdAt);
 
+    /**
+     * Configures the misfire policy and lateness threshold of an already-registered
+     * recurring task (CRON, FIXED_DELAY, FIXED_RATE).
+     * <p>
+     * This is the runtime wiring behind {@link TaskBuilder#misfirePolicy(MisfirePolicy)}
+     * and {@link TaskBuilder#misfireThreshold(Duration)}: {@code TaskBuilder.register()}
+     * applies the configured values through this method right after dispatching the task
+     * into the scheduler (the same post-registration pattern as {@link #setCreatedAt}).
+     * ONE_SHOT tasks accept the configuration but ignore it at runtime.
+     * </p>
+     * <p>
+     * Tasks that never receive a misfire configuration keep the pre-1.3.0 behavior:
+     * no late-fire detection and no pause-gap catch-up.
+     * </p>
+     * <p>
+     * Default implementation is a no-op so third-party implementations of this interface
+     * remain source-compatible; {@link DefaultFlexScheduledTaskService} overrides it and
+     * delegates to the registrar.
+     * </p>
+     *
+     * @param taskName  the task name; must not be empty
+     * @param policy    the misfire policy; must not be null
+     * @param threshold lateness beyond which a fire is a misfire; must be positive
+     */
+    default void setMisfireConfig(String taskName, MisfirePolicy policy, Duration threshold) {
+        // no-op by default; DefaultFlexScheduledTaskService wires this into the registrar
+    }
+
     // ─── Query ────────────────────────────────────────────────────────
 
     boolean exists(String taskName);
